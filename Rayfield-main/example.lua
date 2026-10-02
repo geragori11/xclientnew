@@ -11,6 +11,11 @@
 		Description = "..."   -- small muted line under the row title
 		Settings = { ... }    -- per module settings, opened by the row's gear
 		                         icon in the left flyout
+		OpenKey = "K"         -- default key that shows / hides the menu
+		LoadingTitle/LoadingDuration -- the boot animation of the window
+
+	The extended widgets (PlayerWidget, Image, Crosshair, Graph, Progress,
+	Stepper, Segment, Wheel, Analog, Radar, Chips) are shown further down.
 =========================================================================]]
 
 -- 1. load the library -------------------------------------------------------
@@ -37,6 +42,7 @@ local Window = XClient:CreateWindow({
 	Icon = 0,                       -- 0 = no icon, or an asset id / icon name
 	LoadingTitle = "XClient Interface Suite",
 	LoadingSubtitle = "by XClient",
+	LoadingDuration = 1.4,          -- length of the boot animation in seconds
 	Theme = "Default",              -- Neverlose / Midnight / Blood
 
 	ConfigurationSaving = {
@@ -54,7 +60,9 @@ local Window = XClient:CreateWindow({
 	KeySystem = false,              -- accepted for compatibility, unused
 	KeySettings = { Title = "Untitled" },
 
-	ToggleUIKeybind = "K",          -- hide / show the interface
+	ToggleUIKeybind = "K",          -- legacy name of OpenKey, both work
+	--  OpenKey = "K",               -- the key that shows / hides the menu; the
+	--                               -- player can rebind it in the settings panel
 })
 
 -- 3. tabs -------------------------------------------------------------------
@@ -182,8 +190,102 @@ local CombatModule = SecondTab:CreateToggle({
 		{ Type = "Dropdown", Name = "Hitbox", Options = { "Head", "Torso", "Closest" }, CurrentOption = "Head", Flag = "AimbotHitbox" },
 		{ Type = "ColorPicker", Name = "Highlight", Color = Color3.fromRGB(255, 60, 60), Flag = "AimbotColour" },
 		{ Type = "Keybind", Name = "Hold key", CurrentKeybind = "C", HoldToInteract = true, Flag = "AimbotHold" },
+		--  the extended widgets work in here exactly like they do on a tab
+		{
+			Type = "PlayerWidget",
+			Name = "Skin visualisation",
+			Flag = "AimbotSkin",
+			Skin = { Torso = Color3.fromRGB(255, 90, 90) },
+			Callback = function(region, isOn)
+				print("aim part", region, isOn)   -- drive the module from the picture
+			end,
+		},
+		{ Type = "Crosshair", Name = "FOV pad", FOV = 90, MaxFOV = 360, Flag = "AimbotFOVPad" },
+		{ Type = "Chips", Name = "Bones", Options = { "Head", "Torso", "Arms" }, Flag = "AimbotBones" },
+		{ Type = "Segment", Name = "Mode", Options = { "Legit", "Rage" }, CurrentOption = "Legit" },
+		{ Type = "Progress", Name = "Charge", CurrentValue = 0.3, Flag = "AimbotCharge" },
+		{ Type = "Image", Name = "Preview", Image = 4483362458, Flag = "AimbotPreview" },
 	},
 })
+
+-- 5b. extended widgets -------------------------------------------------------
+--  Every widget below keeps the same contract as the classic elements: it is
+--  built on a tab, returns its settings table, supports Flag / Description /
+--  Settings, and reacts the moment a variable changes.
+
+--  interactive character: every body part is a picture *and* a variable
+local Skin = SecondTab:CreatePlayerWidget({
+	Name = "Skin visualisation",
+	Description = "Click a body part, or drive it from code",
+	Flag = "SkinPreview",
+	Selected = { "Torso" },
+	Skin = { Head = Color3.fromRGB(240, 200, 120) },
+	Callback = function(region, isOn)
+		print("skin region", region, isOn)
+	end,
+})
+Skin.Highlight.Head = true                      -- repaints immediately
+Skin.Highlight["left leg"] = true               -- aliases and spaces work
+Skin.Skin.Torso = Color3.fromRGB(255, 90, 90)   -- recolour the picture
+print(Skin:GetRegion("Torso"), Skin.Highlight.Torso)
+Skin.Highlight.All = false                      -- clear every highlight
+
+--  a picture with markers (skin / UI visualisation)
+local Picture = SecondTab:CreateImage({
+	Name = "Skin picture",
+	Flag = "SkinPicture",
+	Image = 4483362458,                         -- replace with your own render
+	Height = 140,
+	Points = { Gun = { 0.82, 0.42 } },          -- extra marker points (0 - 1)
+})
+Picture.Marker.Torso = true
+Picture:SetMarker("Head", Color3.fromRGB(255, 90, 90))
+Picture:SetTint(Color3.fromRGB(210, 225, 255))
+
+--  crosshair / FOV pad (drag the dot inside the pad)
+local Crosshair = SecondTab:CreateCrosshair({ Name = "Aim FOV", Flag = "AimFOV", FOV = 90, MaxFOV = 360 })
+Crosshair:SetFOV(140)
+
+--  live graph, progress bar and stepper
+local Graph = SecondTab:CreateGraph({ Name = "Ping", Flag = "PingGraph", Max = 300, Samples = 40 })
+Graph:Push(42)
+
+local Loader = SecondTab:CreateProgress({ Name = "Charge", Flag = "Charge", Min = 0, Max = 100 })
+Loader:Set(35)
+
+local Step = SecondTab:CreateStepper({
+	Name = "Delay", Flag = "Delay", Min = 0, Max = 1000, Increment = 25, Suffix = " ms",
+})
+Step:Set(300)
+
+--  segments, wheel, analog stick, radar and chips
+local Mode = SecondTab:CreateSegment({
+	Name = "Mode", Flag = "Mode",
+	Options = { "Legit", "Rage", "Auto" }, CurrentOption = "Legit",
+})
+Mode:Set("Rage")
+
+local Wheel = SecondTab:CreateWheel({
+	Name = "Hitbox", Flag = "Hitbox",
+	Options = { "Head", "Torso", "Nearest" }, CurrentOption = "Head",
+})
+Wheel:Next()
+
+local Stick = SecondTab:CreateAnalog({ Name = "Recoil control", Flag = "Recoil" })
+Stick:Set(0, -0.4)
+
+local Radar = SecondTab:CreateRadar({ Name = "Radar", Max = 24 })
+Radar:Push({ X = 0.2, Y = -0.4, Color = Color3.fromRGB(255, 90, 90) })
+
+local Bones = SecondTab:CreateChips({
+	Name = "Bones", Flag = "Bones",
+	Options = { "Head", "Torso", "Arms", "Legs" },
+})
+Bones:Set({ "Head", "Torso" })
+
+--  switched any time, no reload needed
+--  XClient:SetFont("Classic")          -- CS (default) | Classic | Mono | table
+--  XClient:SetOpenKey("RightShift")    -- the default is "K"
 
 -- 6. notifications ----------------------------------------------------------
 XClient:Notify({

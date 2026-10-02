@@ -449,6 +449,13 @@ local function service(name)
 	elseif name == "RunService" then
 		instance.props.Stepped = Signal.new()
 		instance.props.RenderStepped = Signal.new()
+	elseif name == "TextService" then
+		--  the library measures captions to fit them, so the mock needs a
+		--  believable GetTextSize: condensed HUD metrics, ~0.55em per glyph
+		instance.props.GetTextSize = function(_, text, size)
+			local length = string.len(tostring(text or ""))
+			return Vector2.new(length * size * 0.55, size)
+		end
 	end
 	return instance
 end
@@ -528,6 +535,7 @@ end
 --  make sure the services exist before the library asks for them
 service("HttpService")
 service("UserInputService")
+service("TextService")
 
 print("== 1. loading xclient.lua ==")
 local XClient = dofile("xclient.lua")
@@ -567,6 +575,21 @@ local coreGui = service("CoreGui")
 local gui = coreGui:FindFirstChild("XClient")
 local root = gui and gui:FindFirstChild("XClientWindow")
 check("ScreenGui + window frame created", gui ~= nil and root ~= nil)
+
+--  the loading animation starts with the window (a later section checks that
+--  it removes itself once the delays have run out)
+local splash = root and root:FindFirstChild("Loading")
+check("loading animation shown", splash ~= nil)
+local splashTrack = splash and splash:FindFirstChild("BarTrack")
+check("loading bar exists", splashTrack ~= nil)
+local splashFill = splashTrack and splashTrack:FindFirstChild("BarFill")
+check("loading bar animates to full", splashFill ~= nil and splashFill.Size.X.Scale == 1)
+check("loading shimmer + percentage", splashTrack ~= nil
+	and splashTrack:FindFirstChild("Shimmer") ~= nil
+	and splashTrack:FindFirstChild("Percent") ~= nil)
+check("loading title + subtitle", splash ~= nil
+	and splash:FindFirstChild("Title") ~= nil
+	and splash:FindFirstChild("Subtitle") ~= nil)
 
 print("== 3. tabs (positional args, including Ext) ==")
 local Main = Window:CreateTab("Main", 4483362458)
@@ -962,6 +985,344 @@ check("icon can be replaced with an asset id", iconImage.Image == "rbxassetid://
 IconLabel:Set("No icon", "NotInTheTable")
 check("unknown icon clears the image", iconImage.Image == "" and iconImage.Visible == false)
 
+print("== 17. fonts and caption fitting ==")
+check("default font profile is CS", XClient:GetFont() == "CS")
+check("font profiles exposed", realType(XClient.Fonts) == "table" and XClient.Fonts.CS ~= nil)
+local fitToggle = Main:CreateToggle({ Name = "Fit", Flag = "fitFlag" })
+check("CS face applied to a row title", fitToggle.Base.title.Font == Enum.Font.Oswald)
+check("short caption keeps the full size", fitToggle.Base.title.TextSize == 15)
+check("caption not wrapped when it fits", fitToggle.Base.title.TextWrapped == false)
+
+local longTitle = string.rep("Extremely long module caption ", 3)
+local longToggle = Main:CreateToggle({ Name = longTitle, Description = "with a description", Flag = "longFlag" })
+local longLabel = longToggle.Base.title
+check("long caption keeps the full text", longLabel.Text == longTitle)
+check("long caption wraps instead of clipping", longLabel.TextWrapped == true)
+check("long caption font is reduced", longLabel.TextSize <= 11)
+check("row grows for the wrapped caption", longToggle.Base.row.Size.Y.Offset > 46)
+
+local mediumLabel = Main:CreateLabel(string.rep("Caption ", 10))
+check("label caption measured and fitted", mediumLabel.Element.Title.TextSize <= 13)
+check("description fitted as well", longToggle.Base.desc ~= nil and longToggle.Base.desc.TextSize <= 12)
+
+XClient:SetFont("Classic")
+check("SetFont switches the profile", XClient:GetFont() == "Classic")
+check("rebuilt rows use the classic face", fitToggle.Base.title.Font == Enum.Font.GothamBold)
+check("classic profile has no size offset", fitToggle.Base.title.TextSize == 14)
+check("unknown profile rejected", XClient:SetFont("Nonexistent") == false)
+check("profile kept after a rejected switch", XClient:GetFont() == "Classic")
+XClient:SetFont({ Name = "Test Face", Primary = Enum.Font.Code, Strong = Enum.Font.Code, Offset = 0 })
+check("custom profile accepted", XClient:GetFont() == "Test Face" and XClient.Fonts["Test Face"] ~= nil)
+XClient:SetFont({
+	Name = "Face Profile",
+	Primary = Enum.Font.Code,
+	Strong = Enum.Font.Code,
+	Face = "rbxasset://fonts/families/GothamSSm.json",
+})
+local faceToggle = Main:CreateToggle({ Name = "Face" })
+check("a profile with a custom font face still builds", faceToggle.Base.title ~= nil)
+check("the custom face reaches new elements",
+	faceToggle.Base.title.FontFace == "rbxasset://fonts/families/GothamSSm.json")
+XClient:SetFont("CS")
+check("switching back clears the custom face",
+	Main:CreateLabel("No face").Element.Title.FontFace ~= "rbxasset://fonts/families/GothamSSm.json")
+check("back on CS", XClient:GetFont() == "CS" and fitToggle.Base.title.Font == Enum.Font.Oswald)
+
+print("== 18. default menu open key ==")
+check("library default open key", XClient:GetOpenKey() == "K")
+local openKeyFlag = XClient.Flags["xclient_open_key"]
+check("open key registered as a flag", realType(openKeyFlag) == "table" and openKeyFlag.CurrentKeybind == "K")
+check("Window:GetOpenKey", Window:GetOpenKey() == "K")
+
+pressKey("K", false)
+check("K hides the menu", XClient:IsVisible() == false)
+pressKey("K", false)
+check("K shows the menu again", XClient:IsVisible() == true)
+
+check("SetOpenKey(F5) accepted", XClient:SetOpenKey("F5") == true)
+check("open key updated everywhere", XClient:GetOpenKey() == "F5" and Window:GetOpenKey() == "F5")
+pressKey("F5", false)
+check("F5 hides the menu", XClient:IsVisible() == false)
+pressKey("F5", false)
+check("F5 shows the menu", XClient:IsVisible() == true)
+pressKey("K", false)
+check("the previous key is inert now", XClient:IsVisible() == true)
+
+check("SetOpenKey takes an EnumItem", XClient:SetOpenKey(Enum.KeyCode.G) == true and XClient:GetOpenKey() == "G")
+check("the saved flag follows", openKeyFlag.CurrentKeybind == "G")
+openKeyFlag:Set("J")
+check("config style rebind", XClient:GetOpenKey() == "J")
+check("Window:SetOpenKey", Window:SetOpenKey("K") == "K" and XClient:GetOpenKey() == "K")
+
+Window:ShowSettings()
+local flyout = root:FindFirstChild("SettingsFlyout")
+local flyoutBody = flyout and flyout:FindFirstChild("Body")
+local openKeyRow = flyoutBody and flyoutBody:FindFirstChild("Menu open key")
+check("settings panel lists the open key", openKeyRow ~= nil)
+check("open key row is a keybind box", openKeyRow ~= nil and openKeyRow:FindFirstChild("KeybindBox") ~= nil)
+local openKeyHint = flyoutBody and flyoutBody:FindFirstChild("OpenKeyHint")
+check("settings panel hints the current key", openKeyHint ~= nil and string.find(tostring(openKeyHint.Text), "K") ~= nil)
+if openKeyRow then
+	local box = openKeyRow:FindFirstChild("KeybindBox")
+	box.MouseButton1Click:Fire()
+	pressKey("U", false)
+	check("rebinding from the panel works", XClient:GetOpenKey() == "U")
+end
+Window:HideSettings()
+XClient:SetOpenKey("K")
+check("open key restored", XClient:GetOpenKey() == "K")
+
+print("== 19. PlayerWidget ==")
+--  the mock hands out fresh Color3 tables, so colours are compared field wise
+local function sameColor(a, b)
+	if typeof(a) ~= "Color3" or typeof(b) ~= "Color3" then return false end
+	return math.abs(a.R - b.R) < 0.002 and math.abs(a.G - b.G) < 0.002 and math.abs(a.B - b.B) < 0.002
+end
+
+local regionEvents = {}
+local Player = Main:CreatePlayerWidget({
+	Name = "Skin preview",
+	Flag = "skinFlag",
+	Selected = { "Torso" },
+	Skin = { Head = Color3.fromRGB(240, 200, 120) },
+	Callback = function(region, on) regionEvents[#regionEvents + 1] = { region, on } end,
+})
+check("player widget returned", realType(Player) == "table")
+check("six regions exposed", #Player.Regions == 6)
+check("initial selection applied", Player:GetRegion("Torso") == true)
+check("region lookup is case insensitive", Player:GetRegion("torso") == true)
+check("Skin option applied at build time", sameColor(Player:GetSkin("Head"), Color3.fromRGB(240, 200, 120)))
+check("rig drawn procedurally", Player.Element:FindFirstChild("Rig") ~= nil)
+check("body parts exist", Player.Element.Rig:FindFirstChild("Head") ~= nil
+	and Player.Element.Rig:FindFirstChild("LeftLeg") ~= nil)
+check("player widget registered as a flag", XClient.Flags["skinFlag"] == Player)
+
+Player.Highlight.Head = true
+check("widget.Highlight.Head = true repaints", Player:GetRegion("Head") == true)
+check("caption follows the selection", string.find(tostring(Player.Element.Caption.Text), "Head") ~= nil)
+Player.Highlight.All = false
+check("widget.Highlight.All = false clears", #Player:GetSelection() == 0)
+check("empty selection caption", Player.Element.Caption.Text == "Selected: none")
+
+Player:SetRegion("LeftLeg", true)
+check("SetRegion selects a region", Player:GetSelection()[1] == "LeftLeg")
+Player.Element.Rig.LeftArm.MouseButton1Click:Fire()
+check("clicking a body part highlights it", Player:GetRegion("LeftArm") == true)
+check("click fires the callback", #regionEvents == 1 and regionEvents[1][1] == "LeftArm" and regionEvents[1][2] == true)
+
+Player.Skin.Torso = Color3.fromRGB(10, 20, 30)
+check("widget.Skin.Torso reads back", sameColor(Player:GetSkin("Torso"), Color3.fromRGB(10, 20, 30)))
+check("skin colour reaches the picture", sameColor(Player.Element.Rig.Torso.BackgroundColor3, Color3.fromRGB(10, 20, 30)))
+check("unhighlighted parts use the skin colour", Player.Element.Rig.LeftLeg.BackgroundColor3 ~= nil)
+
+Player:Set({ "Head", "Torso" })
+check(":Set(list) applies a selection", #Player:GetSelection() == 2 and Player:GetRegion("Head") == true)
+check(":Serialize matches the selection", #Player:Serialize() == 2)
+Player:Clear()
+check(":Clear empties the selection", #Player:GetSelection() == 0 and #Player:Serialize() == 0)
+
+local single = Second:CreatePlayerWidget({ Name = "Single pick", AllowMultiple = false })
+single:SetRegion("Head", true)
+single:SetRegion("Torso", true)
+check("AllowMultiple = false replaces the selection", #single:GetSelection() == 1 and single:GetRegion("Torso") == true)
+single.Highlight["right arm"] = true
+check("spaced region aliases work", single:GetRegion("RightArm") == true)
+
+print("== 20. extra widgets: crosshair / graph / progress / stepper ==")
+local Crosshair = Main:CreateCrosshair({ Name = "Aim FOV", Flag = "fovFlag", FOV = 90, MaxFOV = 360, Dot = { X = 1, Y = 1 } })
+check("crosshair returned", realType(Crosshair) == "table")
+check("fov circle drawn", Crosshair.Element:FindFirstChild("FOV") ~= nil)
+check("crosshair dot clamped into the pad", Crosshair.Dot.X == 1 and Crosshair.Dot.Y == 1)
+local ringSize = Crosshair.Element.FOV.Size.X.Offset
+Crosshair:SetFOV(180)
+check("SetFOV updates the value", Crosshair.FOV == 180)
+check("SetFOV grows the circle", Crosshair.Element.FOV.Size.X.Offset > ringSize)
+Crosshair:SetOffset(0.5, -0.5)
+check("SetOffset moves the dot", Crosshair.Dot.X == 0.5 and Crosshair.Dot.Y == -0.5)
+check("caption shows the state", string.find(tostring(Crosshair.Stage.Caption.Text), "FOV 180") ~= nil)
+Crosshair:Set({ FOV = 45, X = 0, Y = 0 })
+check("crosshair :Set(table)", Crosshair.FOV == 45 and Crosshair.Dot.X == 0)
+check("crosshair serialises", realType(Crosshair:Serialize()) == "table" and Crosshair:Serialize().FOV == 45)
+Crosshair:SetFOV(400)
+check("fov clamped to MaxFOV", Crosshair.FOV == 360)
+Crosshair.Element.InputBegan:Fire({ UserInputType = Enum.UserInputType.MouseButton1, Position = Vector2.new(500, 300) })
+UserInputService.InputEnded:Fire({ UserInputType = Enum.UserInputType.MouseButton1 })
+check("dragging the pad does not error", true)
+
+local Graph = Main:CreateGraph({ Name = "Ping graph", Flag = "graphFlag", Max = 300, Samples = 12 })
+check("graph picks up the sample count", Graph.Samples == 12)
+Graph:Push(150)
+check("Push records the latest sample", Graph.CurrentValue == 150)
+check("the history keeps every sample", #Graph:GetValues() == 12 and Graph:GetValues()[12] == 150)
+local firstHeight = Graph.Element.Bar1.Size.Y.Offset
+for _ = 1, 11 do Graph:Push(300) end
+check("bars grow with the values", Graph.Element.Bar1.Size.Y.Offset > firstHeight)
+check("graph serialises to a number", Graph:Serialize() == 300)
+Graph:Clear()
+check("Clear resets the graph", Graph.CurrentValue == 0)
+
+local Loader = Main:CreateProgress({ Name = "Loading", Flag = "loadFlag", Min = 0, Max = 100, Indeterminate = true })
+check("progress can run indeterminate", Loader.Running == true)
+Loader:Set(40)
+check("Set moves the bar", Loader.CurrentValue == 40)
+check("the fill follows the value", math.abs(Loader.Element.Fill.Size.X.Scale - 0.4) < 0.001)
+check("percentage label updated", Loader.Stage.Percent.Text == "40%")
+Loader:Tween(100, 0.2)
+check("Tween reaches the target", Loader.CurrentValue == 100 and Loader.Element.Fill.Size.X.Scale == 1)
+Loader:SetRatio(0.25)
+check("SetRatio uses the 0-1 scale", Loader.CurrentValue == 25)
+Loader:Stop()
+check("Stop halts the animation", Loader.Running == false)
+check("progress serialises to a number", Loader:Serialize() == 25)
+
+local Stepper = Main:CreateStepper({ Name = "Delay", Flag = "stepFlag", Min = 0, Max = 1000, Increment = 25, Suffix = " ms" })
+check("stepper starts at Min", Stepper.CurrentValue == 0)
+Stepper:Step(1)
+check("Step adds one increment", Stepper.CurrentValue == 25)
+check("value text shows the suffix", Stepper.Element.Value.Text == "25 ms")
+Stepper:Increment()
+check("Increment works", Stepper.CurrentValue == 50)
+Stepper:Decrement()
+check("Decrement works", Stepper.CurrentValue == 25)
+Stepper.Element.Plus.MouseButton1Click:Fire()
+check("the + button works", Stepper.CurrentValue == 50)
+Stepper.Element.Minus.MouseButton1Click:Fire()
+check("the - button works", Stepper.CurrentValue == 25)
+Stepper:Set(5000)
+check("value clamped to Max", Stepper.CurrentValue == 1000)
+check("stepper serialises to a number", Stepper:Serialize() == 1000)
+
+print("== 21. extra widgets: segment / wheel / analog / radar / chips / image ==")
+local Segment = Main:CreateSegment({ Name = "Mode", Flag = "segFlag", Options = { "Legit", "Rage", "Auto" }, CurrentOption = "Rage" })
+check("segment picks the current option", Segment.CurrentOption == "Rage")
+check("segment buttons drawn", Segment.Element:FindFirstChild("Legit") ~= nil and Segment.Element:FindFirstChild("Auto") ~= nil)
+check("segment paints the active button", not sameColor(Segment.Element.Rage.BackgroundColor3, Segment.Element.Legit.BackgroundColor3))
+Segment:Set("Auto")
+check("segment :Set(name)", Segment.CurrentOption == "Auto")
+Segment.Element.Legit.MouseButton1Click:Fire()
+check("clicking a segment selects it", Segment.CurrentOption == "Legit")
+check("segment serialises to a string", Segment:Serialize() == "Legit")
+Segment:Set("Missing")
+check("an unknown option clears the selection", Segment.CurrentOption == nil)
+
+local Wheel = Main:CreateWheel({ Name = "Hitbox", Flag = "wheelFlag", Options = { "Head", "Torso", "Nearest" }, CurrentOption = "Torso" })
+check("wheel current option", Wheel.CurrentOption == "Torso")
+check("wheel shows three rows", Wheel.Element:FindFirstChild("Slot1") ~= nil and Wheel.Element:FindFirstChild("Slot3") ~= nil)
+check("wheel highlights the middle row", Wheel.Element.Slot2.Text == "Torso")
+Wheel:Next()
+check("Next moves forward", Wheel.CurrentOption == "Nearest")
+Wheel:Next()
+check("Next wraps around", Wheel.CurrentOption == "Head")
+Wheel:Previous()
+check("Previous wraps back", Wheel.CurrentOption == "Nearest")
+Wheel.Element.Up.MouseButton1Click:Fire()
+check("the up chevron works", Wheel.CurrentOption == "Torso")
+Wheel:SetIndex(1)
+check("SetIndex selects by position", Wheel.CurrentOption == "Head")
+check("wheel serialises to a string", Wheel:Serialize() == "Head")
+
+local Analog = Main:CreateAnalog({ Name = "Movement", Flag = "analogFlag", Deadzone = 0.1 })
+Analog:Set(0.5, -0.5)
+check("analog stores the vector", Analog.CurrentValue.X == 0.5 and Analog.CurrentValue.Y == -0.5)
+check("analog reports the magnitude", math.abs(Analog.CurrentValue.Magnitude - 0.7071) < 0.01)
+check("analog knob moved", Analog.Element.Knob.Position.X.Offset > 0)
+check("analog is active above the deadzone", Analog:IsActive() == true)
+Analog:Center()
+check("Center resets the stick", Analog.CurrentValue.Magnitude == 0 and Analog:IsActive() == false)
+check("analog serialises", realType(Analog:Serialize()) == "table" and Analog:Serialize().X == 0)
+
+local Radar = Main:CreateRadar({ Name = "Radar", Flag = "radarFlag", Max = 2 })
+Radar:Push({ X = 0.5, Y = 0.5, Color = Color3.fromRGB(255, 90, 90) })
+check("blip added", #Radar.Blips == 1)
+check("blip drawn", Radar.Element.Blips.Blip1 ~= nil and Radar.Element.Blips.Blip1.Visible == true)
+Radar:Push({ X = -0.5, Y = 0.5 })
+Radar:Push({ X = 0, Y = -1 })
+check("the blip list respects Max", #Radar.Blips == 2)
+Radar:SetBlips({ { X = 0, Y = 0 } })
+check("SetBlips replaces the list", #Radar:GetBlips() == 1)
+Radar:Clear()
+check("Clear empties the radar", #Radar.Blips == 0)
+local RadarWithBlips = Main:CreateRadar({ Name = "Radar with blips", Blips = { { X = 0.1, Y = 0.1 } } })
+check("Blips option applied at build time", #RadarWithBlips.Blips == 1)
+local MarkedPicture = Main:CreateImage({ Name = "Marked picture", Image = 4483362458, Marked = { "Head" } })
+check("Marked option applied at build time", MarkedPicture:IsMarked("Head") == true)
+
+local Chips = Main:CreateChips({ Name = "Bones", Flag = "chipsFlag", Options = { "Head", "Torso", "Arms" } })
+check("chips are a multi select", Chips.Multi == true and Chips.Type == "Chips")
+Chips:Toggle("Arms")
+check("chip toggled on", #Chips:GetSelection() == 1 and Chips:GetSelection()[1] == "Arms")
+Chips:Set({ "Head", "Torso" })
+check("chips :Set(list)", #Chips:GetSelection() == 2)
+check("chips registered under their own type", XClient.Flags["chipsFlag"].Type == "Chips")
+check("chips serialise to a list", #Chips:Serialize() == 2)
+check("chip buttons drawn", Chips.Element:FindFirstChild("Head") ~= nil)
+
+local Picture = Main:CreateImage({ Name = "Skin", Flag = "imageFlag", Image = 4483362458, Points = { Gun = { 0.8, 0.3 } } })
+check("picture drawn from the asset id", Picture.Element.Image == "rbxassetid://4483362458")
+check("custom point stored", Picture.Points.Gun ~= nil and Picture.Points.Gun[1] == 0.8)
+Picture:SetMarker("Torso", true)
+check("marker set", Picture:IsMarked("Torso") == true)
+check("marker dot drawn", Picture.Element.Markers:FindFirstChild("Marker_Torso") ~= nil)
+check("marker sits on its point", Picture.Element.Markers.Marker_Torso.Position.Y.Scale == Picture.Points.Torso[2])
+Picture.Marker.head = true
+check("lower case marker variable works", Picture:IsMarked("Head") == true)
+check("picture serialises the markers", #Picture:Serialize() == 2)
+Picture:SetMarkers({ "Head" })
+check("SetMarkers replaces the markers", #Picture:GetMarked() == 1 and Picture:IsMarked("Torso") == false)
+Picture:ClearMarkers()
+check("ClearMarkers empties the picture", #Picture:GetMarked() == 0)
+Picture:SetTint(Color3.fromRGB(200, 220, 255))
+check("tint applied", sameColor(Picture.Element.ImageColor3, Color3.fromRGB(200, 220, 255)))
+
+print("== 22. new widgets inside a module settings flyout ==")
+local SettingsToggle = Main:CreateToggle({
+	Name = "Module with viewer settings",
+	Flag = "viewerFlag",
+	Settings = {
+		"Visuals",
+		{ Type = "PlayerWidget", Name = "Skin", Flag = "modSkin", Selected = { "Head" } },
+		{ Type = "Stepper", Name = "FOV step", Min = 0, Max = 90, Increment = 5, CurrentValue = 20, Flag = "modStep" },
+		{ Type = "Progress", Name = "Load", CurrentValue = 0.5, Flag = "modLoad" },
+		{ Type = "Segment", Name = "Mode", Options = { "A", "B" }, CurrentOption = "B", Flag = "modSeg" },
+		{ Type = "Chips", Name = "Bones", Options = { "Head", "Torso" }, Flag = "modChips" },
+		{ Type = "Wheel", Name = "Priority", Options = { "Low", "High" }, CurrentOption = "High", Flag = "modWheel" },
+		{ Type = "Graph", Name = "Trace", Max = 60, Samples = 8, Flag = "modGraph" },
+		{ Type = "Crosshair", Name = "FOV pad", FOV = 60, Flag = "modCross" },
+		{ Type = "Analog", Name = "Recoil", Flag = "modAnalog" },
+		{ Type = "Radar", Name = "Radar view", Flag = "modRadar" },
+		{ Type = "Image", Name = "Skin picture", Image = 4483362458, Flag = "modImage" },
+	},
+})
+SettingsToggle.Base.gearButton.MouseButton1Click:Fire()
+local function inFlyout(name) return flyoutBody and flyoutBody:FindFirstChild(name) end
+check("module flyout opened", inFlyout("Skin") ~= nil)
+check("flyout captions are fitted", inFlyout("FOV step") ~= nil
+	and inFlyout("FOV step"):FindFirstChild("Title").TextSize <= 15)
+check("player widget inside the flyout", inFlyout("Skin") ~= nil and inFlyout("Skin"):FindFirstChild("Stage") ~= nil)
+check("stepper inside the flyout", XClient.Flags["modStep"] ~= nil and XClient.Flags["modStep"].CurrentValue == 20)
+check("progress inside the flyout", XClient.Flags["modLoad"] ~= nil and XClient.Flags["modLoad"].CurrentValue == 0.5)
+check("segment inside the flyout", XClient.Flags["modSeg"] ~= nil and XClient.Flags["modSeg"].CurrentOption == "B")
+check("chips inside the flyout", XClient.Flags["modChips"] ~= nil
+	and #XClient.Flags["modChips"]:GetSelection() == 0)
+check("wheel inside the flyout", XClient.Flags["modWheel"] ~= nil and XClient.Flags["modWheel"].CurrentOption == "High")
+check("graph inside the flyout", XClient.Flags["modGraph"] ~= nil and #XClient.Flags["modGraph"]:GetValues() == 8)
+check("crosshair inside the flyout", XClient.Flags["modCross"] ~= nil and XClient.Flags["modCross"].FOV == 60)
+check("analog inside the flyout", XClient.Flags["modAnalog"] ~= nil
+	and XClient.Flags["modAnalog"].Element:FindFirstChild("Knob") ~= nil)
+check("radar inside the flyout", XClient.Flags["modRadar"] ~= nil and inFlyout("Radar view") ~= nil)
+check("image inside the flyout", XClient.Flags["modImage"] ~= nil and inFlyout("Skin picture") ~= nil)
+check("flyout viewer reacts to its variable", XClient.Flags["modSkin"]:GetRegion("Head") == true)
+XClient.Flags["modSkin"].Highlight.Torso = true
+check("flyout viewer variable repaints", XClient.Flags["modSkin"]:GetRegion("Torso") == true)
+--  a configuration stores the widget shape through :Serialize
+local serialized = XClient.Flags["modSkin"]:Serialize()
+check("widget knows how to serialise its state", realType(serialized) == "table" and #serialized == 2)
+Window:HideSettings()
+
+print("== 23. the loading animation cleans itself up ==")
+for _ = 1, 30 do drainDeferred() end
+check("loading overlay finished and removed", root:FindFirstChild("Loading") == nil)
+
 print("== 14. visibility, notifications, destroy ==")
 check("IsVisible defaults to true", XClient:IsVisible() == true)
 XClient:SetVisibility(false)
@@ -979,6 +1340,49 @@ check("XClient:SaveConfiguration", isfile("XClient/Configurations/Big Hub.rfld")
 Window:Destroy()
 check("destroy removes the interface", coreGui:FindFirstChild("XClient") == nil)
 check("window registry emptied", #XClient.Windows == 0)
+
+print("== 24. example.lua end to end ==")
+--  the example fetches the library over HTTP and builds everything documented;
+--  serve the library from disk and run the whole thing inside the shim
+local function readSource(path)
+	local handle = io.open(path, "rb")
+	if not handle then return nil end
+	local contents = handle:read("*a")
+	handle:close()
+	return contents
+end
+local librarySource = readSource("xclient.lua")
+local exampleSource = readSource("example.lua")
+check("example.lua is readable", type(exampleSource) == "string" and #exampleSource > 2000)
+check("xclient.lua is readable", type(librarySource) == "string" and #librarySource > 2000)
+game.HttpGet = function(_, url) return librarySource end
+game.HttpGetAsync = game.HttpGet
+
+local exampleChunk = loadstring(exampleSource, "example")
+check("example.lua compiles", type(exampleChunk) == "function")
+if exampleChunk then
+	local ok, err = pcall(exampleChunk)
+	check("example.lua runs clean (" .. tostring(err) .. ")", ok == true)
+	if ok then
+		for _ = 1, 40 do drainDeferred() end
+		local instance = getgenv().XClient
+		check("the example built its own library instance", realType(instance) == "table" and instance ~= XClient)
+		check("the example window exists", realType(instance.Windows) == "table" and instance.Windows[1] ~= nil)
+		check("example flags registered", instance.Flags["Toggle1"] ~= nil and instance.Flags["Aimbot"] ~= nil)
+		--  module settings are built on demand, when the gear is pressed
+		local aimbotBase = instance.Flags["Aimbot"].Base
+		if aimbotBase and aimbotBase.gearButton then aimbotBase.gearButton.MouseButton1Click:Fire() end
+		check("example module settings build on demand", instance.Flags["AimbotFOV"] ~= nil
+			and instance.Flags["AimbotBones"] ~= nil and instance.Flags["AimbotSkin"] ~= nil)
+		check("example widget flags registered", instance.Flags["SkinPreview"] ~= nil
+			and instance.Flags["SkinPicture"] ~= nil and instance.Flags["Bones"] ~= nil
+			and instance.Flags["Recoil"] ~= nil and instance.Flags["PingGraph"] ~= nil)
+		check("example player widget works", instance.Flags["SkinPreview"]:GetRegion("Head") == false
+			and realType(instance.Flags["SkinPreview"].Highlight) == "table")
+		check("example window answers the new API", realType(instance.Windows[1].SetOpenKey) == "function"
+			and instance:GetFont() == "CS")
+	end
+end
 
 print("")
 print(string.format("%d checks, %d failures", total, failures))

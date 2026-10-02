@@ -23,10 +23,12 @@ The library is also placed in the executor environment as `getgenv().XClient`.
 local Window = XClient:CreateWindow({
 	Name = "My Script",              -- window / topbar title
 	Icon = 0,                        -- 0, an asset id, or a named icon
-	LoadingTitle = "My Script",      -- optional splash title
-	LoadingSubtitle = "by me",       -- optional splash subtitle
+	LoadingTitle = "My Script",      -- optional boot animation title
+	LoadingSubtitle = "by me",       -- optional boot animation subtitle
+	LoadingDuration = 1.5,           -- boot animation length (false disables it)
 	Theme = "Default",               -- Neverlose | Midnight | Blood (+ aliases)
-	ToggleUIKeybind = "K",           -- hide/show key, string or Enum.KeyCode
+	OpenKey = "K",                   -- default key that shows/hides the menu
+	ToggleUIKeybind = "K",           -- legacy alias of OpenKey, still accepted
 
 	ConfigurationSaving = {
 		Enabled = true,
@@ -52,6 +54,7 @@ very next line.
 | `Window:SaveConfiguration()` | write the current values to the configured file |
 | `Window:LoadConfiguration()` | load the configured file |
 | `Window:SetVisibility(bool)` / `Window:IsVisible()` | show / hide the interface |
+| `Window:SetOpenKey(key)` / `Window:GetOpenKey()` | change / read the menu open key (section 14) |
 | `Window:ShowSettings()` / `Window:HideSettings()` | open / close the left settings flyout |
 | `Window:Destroy()` | remove the interface |
 
@@ -334,5 +337,399 @@ XClient:Destroy()              -- tear the interface down (the X button does thi
 
 New in XClient: the per module gear with the left settings flyout, the
 `Description` line, the in-window configuration panel and the theme picker.
+
+Elements added on top of the previous interface (all backwards compatible):
+
+| Element | Create call | Section |
+| --- | --- | --- |
+| PlayerWidget | `Tab:CreatePlayerWidget` | 16.1 |
+| Image with markers | `Tab:CreateImage` | 16.2 |
+| Crosshair / FOV pad | `Tab:CreateCrosshair` | 16.3 |
+| Graph | `Tab:CreateGraph` | 16.4 |
+| Progress / loader | `Tab:CreateProgress` | 16.5 |
+| Stepper | `Tab:CreateStepper` | 16.6 |
+| Segmented control | `Tab:CreateSegment` | 16.7 |
+| Wheel | `Tab:CreateWheel` | 16.8 |
+| Analog stick | `Tab:CreateAnalog` | 16.9 |
+| Radar | `Tab:CreateRadar` | 16.10 |
+| Chips | `Tab:CreateChips` | 16.11 |
+
+---
+
+## 13. Fonts (CS style by default)
+
+The interface ships with three font profiles; the default is **CS** — the
+condensed, squared off HUD face competitive shooters use.
+
+| Profile | Text | Titles | Size offset |
+| --- | --- | --- | --- |
+| `CS` (default) | `RobotoCondensed` | `Oswald` | +1 |
+| `Classic` | `Gotham` | `GothamBold` | 0 |
+| `Mono` | `RobotoMono` | `Code` | -1 |
+
+```lua
+XClient:SetFont("Classic")     -- CS | Classic | Mono
+XClient:GetFont()              -- "CS"
+XClient.Fonts                  -- every profile
+
+--  register your own
+XClient:SetFont({
+	Name = "Navy",
+	Primary = Enum.Font.Sarpanch,
+	Strong = Enum.Font.Sarpanch,
+	Mono = Enum.Font.Code,
+	Offset = 1,
+})
+```
+
+`SetFont` rebuilds every open window straight away, so the switch is visible
+immediately. The player can do the same from the settings panel
+(`Font → Interface font`).
+
+### Using a real CS font file
+
+Roblox only ships its own font families, so the `CS` profile uses the closest
+built-in condensed faces. If you have the Counter-Strike face (or any other)
+uploaded, hand XClient its asset through a profile — it is applied as `FontFace`
+through a safety check, so a client without that property simply keeps the
+`Enum.Font` families of the profile:
+
+```lua
+XClient:SetFont({
+	Name = "CS Real",
+	Primary = Enum.Font.RobotoCondensed,
+	Strong = Enum.Font.Oswald,
+	Face = "rbxasset://fonts/families/GothamSSm.json",  -- or "rbxassetid://<font>"
+	Offset = 1,
+})
+```
+
+### Captions always fit
+
+Every caption is measured (`TextService:GetTextSize`) and fitted into the space
+it really has:
+
+* long row titles are stepped down to `TextSize` 10;
+* if even that is too wide the row **grows** and the caption wraps onto a second
+  line, so nothing is cut off mid-word;
+* control labels (keybinds, selectors, slider values, wheel entries, option
+  lists) shrink and finally receive an ellipsis, because their boxes have a
+  fixed height.
+
+This applies inside tabs **and** inside the narrower settings flyout — the
+window tells the row builders the smaller width while it populates the flyout.
+
+---
+
+## 14. Menu open key
+
+The key that shows / hides the whole menu is a first class setting: pick a
+default in `CreateWindow` and the player can rebind it from the settings panel.
+
+```lua
+local Window = XClient:CreateWindow({ Name = "My Script", OpenKey = "RightShift" })
+```
+
+Accepted option names (the first one found wins): `OpenKey`, `DefaultOpenKey`,
+`DefaultKey`, `MenuKey`, `OpenKeybind`, `ToggleKey`, `ToggleUIKeybind` (the name
+the previous interface used), then `XClient.OpenKey`, then `"K"`. Values may be
+strings (`"K"`, `"RightShift"`) or `Enum.KeyCode.K`.
+
+```lua
+XClient:SetOpenKey("F5")             -- default for every window, incl. open ones
+XClient:SetOpenKey(Enum.KeyCode.G)
+XClient:GetOpenKey()                 -- "G"
+Window:SetOpenKey("K") / Window:GetOpenKey()
+```
+
+Inside the interface: **settings gear → Interface → "Menu open key"**. The row is
+a normal keybind (click it and press a key, mouse button 2 clears it), a hint
+line under it always shows the current bind and a `Reset open key to K` button
+restores the default.
+
+The bind is stored in the configuration under the flag `xclient_open_key`, so it
+survives `SaveConfiguration()` / `LoadConfiguration()` like any other element.
+
+---
+
+## 15. Loading animation
+
+Creating the window plays a short CS style boot sequence over the interface:
+HUD corner brackets, the title, a bar that fills up while a shimmer sweeps it, a
+percentage counter and a status line that steps through the loading stages. When
+it is done the overlay fades out and removes itself. The window itself slides and
+scales into place instead of popping in.
+
+```lua
+local Window = XClient:CreateWindow({
+	Name = "My Script",
+	Loading = true,                     -- false turns the animation off
+	LoadingTitle = "My Script",         -- big line
+	LoadingSubtitle = "by me",          -- line under it
+	LoadingSteps = { "Loading modules", "Building interface", "Ready" },
+	LoadingDuration = 1.5,              -- seconds
+})
+```
+
+* `Loading = false` — no animation at all.
+* `Loading = <number>` (or `LoadingDuration`) — length in seconds.
+* `Loading = { Title = ..., Subtitle = ..., Steps = ..., Duration = ... }` —
+  table form, the same keys as above.
+* Without any of these options nothing is shown, so old scripts behave exactly
+  as before.
+
+---
+
+## 16. Extra widgets
+
+Every widget below follows the same contract as the classic elements: it is
+created on a tab, returns the settings table, supports `Flag`, `Description`,
+`Settings` (the gear flyout) and `:Set(...)`, and it can be used inside a module's
+`Settings` list — so a viewer such as **PlayerWidget** can be the skin preview of
+a module. Each of them also defines `:Serialize()` / `:Set(value)` for the
+configuration system; a different element type is saved back in the same `.rfld`.
+
+### 16.1 PlayerWidget — interactive character
+
+```lua
+local Widget = Tab:CreatePlayerWidget({
+	Name = "Skin preview",
+	Flag = "skin",
+	Description = "Click a body part to highlight it",
+	Selected = { "Torso" },                      -- initial highlights
+	Skin = { Head = Color3.fromRGB(240, 200, 120) },  -- or a single Color3
+	AllowMultiple = true,                        -- false -> only one part at a time
+	Callback = function(region, isOn, widget) end,
+})
+```
+
+The character (head, torso, two arms, two legs) is drawn procedurally and every
+part is both a picture and a variable:
+
+```lua
+Widget.Highlight.Torso = true     -- picture repaints immediately
+Widget.Highlight.torso = true     -- lower case works as well
+Widget.Highlight["left arm"] = true
+Widget.Highlight.All = false      -- clears everything
+Widget.Skin.Head = Color3.fromRGB(255, 210, 80)   -- recolour the picture
+print(Widget.Highlight.Torso, Widget:GetRegion("Torso"))
+```
+
+| Member | Description |
+| --- | --- |
+| `Widget.Highlight` | live table: `Widget.Highlight.Torso = true/false` |
+| `Widget.Skin` | live table of `Color3` per region |
+| `Widget.Regions` | the six region names |
+| `Widget.Selected` | array of the highlighted regions |
+| `Widget:SetRegion(name, on)` / `:GetRegion(name)` | programmatic access, name above (`"torso"`, `"left arm"`, `"all"`) |
+| `Widget:SetSkin(name, color)` / `:GetSkin(name)` | recolour one part |
+| `Widget:GetSelection()` | copy of `Selected` |
+| `Widget:Clear()` / `:Refresh()` | clear / repaint |
+| `Widget:Set(arrayOrTable)` | `{ "Head", "Torso" }`, a name, or `{ Regions = ..., Skin = ... }` |
+| `Widget.Stage` | the frame the character is drawn in |
+
+`Serialize()` stores the array of highlighted regions, which is what a
+configuration writes into the `.rfld` file.
+
+### 16.2 Image with markers — skin / UI visualisation
+
+```lua
+local Picture = Tab:CreateImage({
+	Name = "Skin picture",
+	Flag = "skinMarker",
+	Image = 4483362458,                          -- asset id, url or named icon
+	Height = 140,
+	Points = { Gun = { 0.8, 0.3 } },             -- extra marker points (0 - 1)
+})
+
+Picture.Marker.Torso = true      -- draws the dot, repaints immediately
+Picture.Marker.head = true
+Picture:SetMarker("LeftLeg", Color3.fromRGB(255, 90, 90))
+Picture:SetTint(Color3.fromRGB(200, 220, 255))
+```
+
+| Member | Description |
+| --- | --- |
+| `Picture.Marker` | live table — any truthy value shows the marker at that point |
+| `Picture.Points` | live table of normalised points (`{ x, y }`), edit or extend it |
+| `Picture:SetMarker(name, state)` / `:IsMarked(name)` | programmatic access |
+| `Picture:SetMarkers(array)` / `:GetMarked()` | all markers at once |
+| `Picture:AddPoint(name, x, y)` / `:RemovePoint(name)` | extra points (gun, backpack, …) |
+| `Picture:SetImage(icon)` / `:SetTint(color)` / `:SetTransparency(n)` | picture controls |
+| `Picture:ClearMarkers()` | remove every marker |
+
+Default points are the six character regions, so `Marker.Torso = true` marks the
+torso of a skin render without any extra setup. `Serialize()` stores the marked
+region names.
+
+### 16.3 Crosshair / FOV pad
+
+```lua
+local Crosshair = Tab:CreateCrosshair({
+	Name = "Aim FOV", Flag = "fov", FOV = 90, MaxFOV = 360,
+	Dot = { X = 0.1, Y = -0.2 },                 -- -1 - 1 inside the pad
+	Callback = function(value) end,              -- { FOV = , X = , Y = }
+})
+Crosshair:SetFOV(120)      Crosshair:SetOffset(0, 0.5)
+Crosshair:Set({ FOV = 45, X = 0, Y = 0 })
+print(Crosshair.FOV, Crosshair.Dot.X, Crosshair.Dot.Y)
+```
+
+The circle is the field of view and drags the dot inside the pad. `MaxFOV`
+clamps `FOV`; `Serialize()` returns `{ FOV = , X = , Y = }`.
+
+### 16.4 Graph
+
+```lua
+local Graph = Tab:CreateGraph({ Name = "Ping", Flag = "ping", Max = 300, Samples = 40 })
+Graph:Push(42)        -- shift in one sample
+Graph:Set(120)        -- same as :Push
+Graph:Clear()
+print(Graph.CurrentValue, Graph:GetValues()[1])
+```
+
+Bars are colour coded (green → accent → red) and grow with the value between
+`Min` (default 0) and `Max`. `Serialize()` returns the newest sample.
+
+### 16.5 Progress / loader
+
+```lua
+local Loader = Tab:CreateProgress({
+	Name = "Loading", Flag = "load", Min = 0, Max = 100,
+	Indeterminate = true,             -- sweeping shimmer (default: off)
+})
+Loader:Set(40)          Loader:SetRatio(0.4)      -- 0 - 1 fraction
+Loader:Tween(100, 0.6)  Loader:Stop()   Loader:Start()
+```
+
+Without `Min` / `Max` the value is a `0 - 1` fraction. `Serialize()` returns the
+current value; `Running` tells whether the shimmer is active.
+
+### 16.6 Stepper
+
+```lua
+local Step = Tab:CreateStepper({
+	Name = "Delay", Flag = "delay", Min = 0, Max = 1000,
+	Increment = 25, Suffix = " ms", Wrap = false,
+})
+Step:Step(1)     Step:Increment()     Step:Decrement()     Step:Set(300)
+print(Step.CurrentValue)      -- number
+```
+
+### 16.7 Segmented control
+
+```lua
+local Mode = Tab:CreateSegment({
+	Name = "Mode", Flag = "mode", CurrentOption = "Legit",
+	Options = { "Legit", "Rage", "Auto" }, PerLine = 3,
+})
+Mode:Set("Rage")      print(Mode.CurrentOption)
+Mode:Toggle("Auto")   -- Multi = true for a multi select strip
+```
+
+`CurrentOption` is a string for a single choice and an array when `Multi = true`
+(`AllowDeselect` also allows clearing it). `Serialize()` follows the same shape,
+and `:GetOptions()` returns a copy of the option list.
+
+### 16.8 Wheel
+
+```lua
+local Wheel = Tab:CreateWheel({
+	Name = "Hitbox", Flag = "hitbox", CurrentOption = "Head",
+	Options = { "Head", "Torso", "Nearest" },
+})
+Wheel:Next()      Wheel:Previous()      Wheel:Set("Torso")     Wheel:SetIndex(1)
+```
+
+Three rows are visible at once and the middle one is the active choice; the
+chevrons and the option rows are clickable. `GetIndex()` returns the position.
+
+### 16.9 Analog stick
+
+```lua
+local Stick = Tab:CreateAnalog({ Name = "Movement", Flag = "move", Deadzone = 0.1 })
+Stick:Set(0.5, -0.5)      Stick:Set({ X = 0, Y = 1 })      Stick:Center()
+print(Stick.CurrentValue.X, Stick.CurrentValue.Magnitude, Stick:IsActive())
+```
+
+`CurrentValue` holds `X`, `Y` (each `-1 - 1`) and the computed `Magnitude`;
+`IsActive()` is true once the stick leaves the `Deadzone`.
+
+### 16.10 Radar
+
+```lua
+local Radar = Tab:CreateRadar({ Name = "Radar", Max = 24, SweepTime = 2.4 })
+Radar:Push({ X = 0.2, Y = -0.4, Color = Color3.fromRGB(255, 90, 90), Size = 9 })
+Radar:SetBlips({ { X = 0, Y = 0.6 } })     Radar:Clear()
+```
+
+Blips are normalised (`1` = outer ring), the sweep line rotates on its own and
+the list is capped at `Max`. Radar is a pure viewer, so it is not written to
+configurations.
+
+### 16.11 Chips
+
+```lua
+local Chips = Tab:CreateChips({
+	Name = "Bones", Flag = "bones", Options = { "Head", "Torso", "Arms" },
+	CurrentOptions = { "Head" },
+})
+Chips:Toggle("Arms")      Chips:Set({ "Head", "Torso" })
+print(#Chips:GetSelection())
+```
+
+A compact multi select strip (rounded pills) for tight layouts;
+`CurrentOptions` / `GetSelection()` / `Serialize()` are arrays.
+
+### 16.12 Inside a module's settings (skin visualisation)
+
+Every widget works inside the gear flyout, so a module can show its own skin
+preview and let it drive (or follow) the module's settings:
+
+```lua
+local Aimbot = Tab:CreateToggle({
+	Name = "Aimbot",
+	Flag = "aimbot",
+	Settings = {
+		"Skin",
+		{
+			Type = "PlayerWidget",
+			Name = "Skin visualisation",
+			Flag = "aimbotSkin",
+			Skin = { Torso = Color3.fromRGB(255, 90, 90) },
+			Callback = function(region, isOn)
+				--  whatever should follow the picture, e.g. the aim part
+				print("aim part:", region, isOn)
+			end,
+		},
+		{ Type = "Crosshair", Name = "FOV",       FOV = 90, Flag = "aimbotFov" },
+		{ Type = "Stepper",   Name = "Smoothing", Min = 1, Max = 20, CurrentValue = 5, Flag = "aimbotSmooth" },
+		{ Type = "Chips",     Name = "Bones",     Options = { "Head", "Torso", "Arms" }, Flag = "aimbotBones" },
+		{ Type = "Progress",  Name = "Charge",    CurrentValue = 0.4, Flag = "aimbotCharge" },
+		{ Type = "Segment",   Name = "Mode",      Options = { "Legit", "Rage" }, CurrentOption = "Legit" },
+		{ Type = "Image",     Name = "Preview",   Image = 4483362458, Flag = "aimbotPreview" },
+	},
+})
+```
+
+Friendly aliases: `Tab:CreatePlayerPreview` (PlayerWidget),
+`Tab:CreateSkinPreview` (Image) and `Tab:CreateLoader` (Progress).
+
+#### Configuration value shapes
+
+| Element | Saved value |
+| --- | --- |
+| PlayerWidget | array of highlighted regions, e.g. `["Head","Torso"]` |
+| Image | array of marked region names |
+| Chips / Segment (`Multi`) | array of the selected options |
+| Segment (single) / Wheel | the selected option name |
+| Crosshair | `{ FOV = 90, X = 0, Y = 0 }` |
+| Analog | `{ X = 0, Y = 1 }` |
+| Graph / Progress / Stepper | number |
+| Keybind / Toggle / Dropdown / Slider / Input / ColorPicker | unchanged |
+
+The widgets restore themselves through the same `:Set(value)` entry point the
+classic elements use, so `LoadConfiguration()` re-applies them without any extra
+code.
 
 

@@ -6,6 +6,17 @@
 		* Full custom / self-contained UI (no external Roblox asset needed)
 		* Dark "Neverlose" theme with a left tab rail, three palettes and the
 		  palette names used by the previous interface
+		* CS style condensed HUD font by default, with switchable profiles
+		  (CS / Classic / Mono / custom): XClient:SetFont("Classic")
+		* Captions are measured and fitted, so a title shrinks or wraps onto a
+		  second line instead of being clipped - in tabs and in the flyout
+		* A default menu open key set in CreateWindow, rebindable from the
+		  settings panel and saved with the configuration
+		* Animated loading screen: HUD brackets, a filling bar with a shimmer,
+		  a percentage counter and a stage list (Loading = false disables it)
+		* Extended widgets (section 9b): PlayerWidget, Image markers,
+		  Crosshair/FOV pad, Graph, Progress, Stepper, Segment, Wheel, Analog,
+		  Radar and Chips - all of them usable inside module settings too
 		* Every module row can expose a gear button on the right; pressing it
 		  slides a settings flyout in from the LEFT of the window
 		* Built-in configuration system (save / load / delete / list / autoload)
@@ -23,6 +34,11 @@
 		Options that are unique to XClient (all optional):
 			Description = "..."   small muted line under a row title
 			Settings = { ... }    per module settings for the gear flyout
+			OpenKey = "K"         default key that shows / hides the menu
+			                      (aliases: DefaultOpenKey, MenuKey,
+			                      OpenKeybind, ToggleKey, ToggleUIKeybind)
+			Loading = true|false|<seconds>   boot animation of the window
+			LoadingTitle / LoadingSubtitle / LoadingSteps / LoadingDuration
 
 	Usage
 		local XClient = loadstring(game:HttpGet("URL_TO/xclient.lua"))()
@@ -55,6 +71,7 @@ local TweenService = getService("TweenService")
 local RunService = getService("RunService")
 local CoreGui = getService("CoreGui")
 local HttpService = getService("HttpService")
+local TextService = getService("TextService")
 
 local LocalPlayer = Players and Players.LocalPlayer or nil
 
@@ -62,10 +79,38 @@ local LocalPlayer = Players and Players.LocalPlayer or nil
 --  2. TINY HELPERS
 --=========================================================================
 
-local THEME_FONT = Enum.Font.Gotham
-local THEME_FONT_BOLD = Enum.Font.GothamBold
+--  Font profiles -----------------------------------------------------------
+--  "CS" is the default look: condensed, squared-off HUD type, the kind of
+--  lettering competitive shooters (and Steam's overlay) use. "Classic" brings
+--  back the rounded geometric font the previous interface used and "Mono" is
+--  a terminal font. Switch at runtime with XClient:SetFont("Classic") or from
+--  the settings panel; every element is rebuilt with the new face.
+local FONT_PROFILES = {
+	CS      = { Primary = Enum.Font.RobotoCondensed, Strong = Enum.Font.Oswald,     Mono = Enum.Font.RobotoMono, Offset = 1 },
+	Classic = { Primary = Enum.Font.Gotham,          Strong = Enum.Font.GothamBold, Mono = Enum.Font.Code,       Offset = 0 },
+	Mono    = { Primary = Enum.Font.RobotoMono,      Strong = Enum.Font.Code,       Mono = Enum.Font.Code,       Offset = -1 },
+}
+local FONT_PROFILE = "CS"
+local THEME_FONT = FONT_PROFILES[FONT_PROFILE].Primary
+local THEME_FONT_BOLD = FONT_PROFILES[FONT_PROFILE].Strong
+local THEME_FONT_MONO = FONT_PROFILES[FONT_PROFILE].Mono
+--  Optional custom font face (a Roblox font asset / family url) for the active
+--  profile. Leave it nil to use the Enum.Font families above; set it in a
+--  profile to plug in a real Counter-Strike style face, e.g.
+--      Face = "rbxasset://fonts/families/GothamSSm.json"
+local THEME_FACE = FONT_PROFILES[FONT_PROFILE].Face
+--  Condensed faces read smaller than the rounded one, so text sizes are
+--  nudged by the profile (applied once, inside create()).
+local FONT_SIZE_OFFSET = FONT_PROFILES[FONT_PROFILE].Offset
+local FONT_MIN_SIZE = 10
 
 local function create(className, props)
+	--  Single choke point for the font size offset of the active font profile
+	--  (see FONT_PROFILES above), so every single text in the interface grows
+	--  or shrinks together with the font family.
+	if props and props.TextSize and (className == "TextLabel" or className == "TextButton" or className == "TextBox") then
+		props.TextSize = props.TextSize + FONT_SIZE_OFFSET
+	end
 	local inst = Instance.new(className)
 	local parent = nil
 	if props then
@@ -76,6 +121,18 @@ local function create(className, props)
 				inst[key] = value
 			end
 		end
+	end
+	--  A font profile may point at a real font asset (see THEME_FACE). This is
+	--  attempted through pcall, so a client without FontFace support simply
+	--  keeps the Enum.Font family that was set above.
+	if THEME_FACE and (className == "TextLabel" or className == "TextButton" or className == "TextBox") then
+		pcall(function()
+			if typeof(Font) == "table" and Font.new then
+				inst.FontFace = Font.new(THEME_FACE)
+			else
+				inst.FontFace = THEME_FACE
+			end
+		end)
 	end
 	if parent then
 		inst.Parent = parent
@@ -141,6 +198,74 @@ local function newFrame(props)
 	props.BorderSizePixel = 0
 	props.BackgroundColor3 = props.BackgroundColor3 or Color3.fromRGB(30, 30, 34)
 	return create("Frame", props)
+end
+
+--  Text measuring and fitting ---------------------------------------------
+--  Everything below keeps a caption inside the width it was given: the font is
+--  stepped down until the string fits and, when even the smallest size is too
+--  wide, the caption wraps onto a second line (rows grow) instead of being
+--  clipped in the middle of a word.
+local function measureText(text, size, font)
+	text = tostring(text or "")
+	if text == "" then return 0 end
+	if TextService and TextService.GetTextSize then
+		local ok, bounds = pcall(function()
+			return TextService:GetTextSize(text, size, font or THEME_FONT, Vector2.new(10000, 10000))
+		end)
+		if ok and typeof(bounds) == "Vector2" then
+			return bounds.X
+		end
+	end
+	--  Fallback estimate for executors without a usable TextService:
+	--  condensed sans, roughly 0.53em per character.
+	return #text * size * 0.53
+end
+
+local function ellipsize(text, size, font, width)
+	text = tostring(text or "")
+	if width <= 0 or measureText(text, size, font) <= width then return text end
+	local cut = #text
+	while cut > 1 and measureText(string.sub(text, 1, cut) .. "...", size, font) > width do
+		cut = cut - 1
+	end
+	return string.sub(text, 1, cut) .. "..."
+end
+
+--  Fits a label into `width` pixels.
+--      opts.MaxSize   starting size (defaults to the label's own size)
+--      opts.MinSize   smallest size that is still readable
+--      opts.Wrap      wrap instead of using an ellipsis (keeps the full text)
+--  Returns the size that was applied plus whether the label ended up wrapped.
+local function fitLabel(label, width, opts)
+	if not label or not width or width <= 0 then return nil, false end
+	opts = opts or {}
+	local text = tostring(label.Text or "")
+	if text == "" then return nil, false end
+	local font = label.Font
+	local maxSize = opts.MaxSize or label.TextSize or 14
+	local minSize = opts.MinSize or FONT_MIN_SIZE
+	if maxSize < minSize then maxSize = minSize end
+	local size = maxSize
+	while size > minSize and measureText(text, size, font) > width do
+		size = size - 1
+	end
+	if measureText(text, size, font) <= width then
+		label.TextSize = size
+		label.TextWrapped = false
+		label.TextTruncate = Enum.TextTruncate.None
+		return size, false
+	end
+	if opts.Wrap then
+		label.TextSize = minSize
+		label.TextWrapped = true
+		label.TextTruncate = Enum.TextTruncate.None
+		return minSize, true
+	end
+	label.TextSize = minSize
+	label.TextWrapped = false
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Text = ellipsize(text, minSize, font, width)
+	return minSize, false
 end
 
 local function tween(obj, time, props, style)
@@ -263,6 +388,26 @@ XClient.Watermark = nil
 --  Named icons: fill this with icons.lua["48px"] (or any name -> asset id map)
 --  to keep older scripts that pass strings such as 'key-round' working.
 XClient.Icons = {}
+--  Active font profile name plus every available profile (see FONT_PROFILES
+--  at the top of the file). XClient:SetFont("Classic") switches at runtime.
+XClient.Font = FONT_PROFILE
+XClient.Fonts = FONT_PROFILES
+--  Default key that shows / hides the menu; CreateWindow({ OpenKey = "K" })
+--  overrides it per window and the settings panel lets the player rebind it.
+XClient.OpenKey = "K"
+
+--  Internal registries: every live window registers its repaint function and
+--  its menu key setter, so library wide calls (SetFont / SetOpenKey) reach the
+--  interface that is currently on screen.
+local repainters = {}
+local openKeySetters = {}
+local function registerRepainter(fn)
+	if type(fn) == "function" then repainters[#repainters + 1] = fn end
+end
+local function clearRegistries()
+	repainters = {}
+	openKeySetters = {}
+end
 
 local function resolveTheme(theme)
 	if type(theme) == "table" then
@@ -524,17 +669,63 @@ local function applyIcon(imageLabel, icon)
 	return true
 end
 
+--  Row text fitting --------------------------------------------------------
+--  Controls are right aligned, so the space a caption may use shrinks by
+--  whatever the control (and the gear button) needs. When even the smallest
+--  font size is too wide the row grows and the caption wraps instead of being
+--  clipped - this is what keeps the settings flyout readable.
+local ROW_WIDTH = 386   -- default page width, CreateWindow overwrites ctx.rowWidth
+
+local function rowTextWidth(base, rowWidth)
+	local right = base.hasGear and (GEAR_RIGHT + GEAR_BUTTON + 8) or CONTROL_RIGHT
+	local control = base.controlWidth or 0
+	return math.max(48, (rowWidth or ROW_WIDTH) - (base.titleX + right + control + 14))
+end
+
+local function fitRowText(base, rowWidth)
+	if not base or not base.title then return end
+	local baseHeight = base.rowHeight or ROW_HEIGHT
+	local available = rowTextWidth(base, rowWidth or base.rowWidth)
+	--  MaxSize is left out on purpose: the label's own size already carries the
+	--  font profile offset (CS = +1), so the profile keeps the last word.
+	local _, wrapped = fitLabel(base.title, available, { MinSize = FONT_MIN_SIZE, Wrap = true })
+	if base.desc then
+		fitLabel(base.desc, available, { MinSize = FONT_MIN_SIZE - 1, Wrap = true })
+	end
+	if wrapped then
+		--  two lines: give the title more height and push the description down
+		base.title.TextYAlignment = Enum.TextYAlignment.Top
+		base.title.Size = UDim2.new(1, -(base.titleX + 20), 0, 28)
+		base.title.Position = UDim2.new(0, base.titleX, 0.5, base.hasDesc and -18 or -13)
+		if base.desc then
+			base.desc.Position = UDim2.new(0, base.titleX, 0.5, 13)
+		end
+		base.row.Size = UDim2.new(1, 0, 0, baseHeight + 14)
+		base.wrappedRow = true
+	elseif base.wrappedRow then
+		base.wrappedRow = nil
+		base.title.TextYAlignment = Enum.TextYAlignment.Center
+		base.title.Size = UDim2.new(1, -(base.titleX + 20), 0, 15)
+		base.title.Position = UDim2.new(0, base.titleX, 0.5, base.hasDesc and -15 or -7)
+		if base.desc then
+			base.desc.Position = UDim2.new(0, base.titleX, 0.5, 1)
+		end
+		base.row.Size = UDim2.new(1, 0, 0, baseHeight)
+	end
+end
+
 -- Builds the base module row: icon + title + description + optional gear button.
 local function newRow(container, ctx, opts)
 	opts = opts or {}
 	local theme = ctx.theme()
 	local hasGear = type(opts.Settings) == "table" and #opts.Settings > 0
 	local hasDesc = opts.Description ~= nil and opts.Description ~= ""
+	local rowHeight = tonumber(opts.Height) or ROW_HEIGHT
 
 	local row = newFrame({
 		Name = opts.Name or "Element",
 		BackgroundColor3 = theme.Surface,
-		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
+		Size = UDim2.new(1, 0, 0, rowHeight),
 		Parent = container,
 	})
 	addCorner(row, UDim.new(0, 6))
@@ -562,6 +753,8 @@ local function newRow(container, ctx, opts)
 		titleX = titleX,
 		hasGear = hasGear,
 		hasDesc = hasDesc,
+		rowWidth = tonumber(ctx.rowWidth) or ROW_WIDTH,
+		rowHeight = rowHeight,
 	}
 
 	base.title = newText({
@@ -625,6 +818,8 @@ local function newRow(container, ctx, opts)
 		end)
 	end
 
+	fitRowText(base, base.rowWidth)
+
 	return base
 end
 
@@ -636,6 +831,8 @@ local function fitControl(base, width)
 	local avail = -(base.titleX + rightOffset + width + 14)
 	base.title.Size = UDim2.new(1, avail, 0, 15)
 	if base.desc then base.desc.Size = UDim2.new(1, avail, 0, 12) end
+	--  re-run the caption fitting now that the control width is known
+	fitRowText(base, base.rowWidth)
 end
 
 --  Registers an element under its flag.  The *element table itself* is stored
@@ -849,6 +1046,8 @@ function builders.Slider(container, ctx, opts)
 	local rightEdge = -(base.controlRight)
 	track.Position = UDim2.new(1, rightEdge + 54, 0.5, 0)
 	valueBox.Position = UDim2.new(1, rightEdge, 0.5, 0)
+	--  keep long values (decimals, suffixes, "Infinity") inside the value box
+	fitLabel(valueBox, 44, { MinSize = 9 })
 
 	--  Backwards compatible contract (see Toggle): the settings table handed in
 	--  by the caller IS the element that gets returned, so mySlider.CurrentValue,
@@ -1085,6 +1284,8 @@ function builders.Dropdown(container, ctx, opts)
 		else
 			label.Text = multi and "Various" or selected[1]
 		end
+		--  the selector is narrow, so the caption is fitted (never clipped)
+		fitLabel(label, boxWidth - 28, { MaxSize = 13, MinSize = 9 })
 	end
 
 	local function choose(name, close)
@@ -1118,7 +1319,7 @@ function builders.Dropdown(container, ctx, opts)
 				Parent = scroll,
 			})
 			addCorner(item, UDim.new(0, 4))
-			newText({
+			local optionLabel = newText({
 				Name = "Title",
 				Text = name,
 				TextSize = 12,
@@ -1128,6 +1329,7 @@ function builders.Dropdown(container, ctx, opts)
 				Position = UDim2.new(0, 8, 0, 0),
 				Parent = item,
 			})
+			fitLabel(optionLabel, math.max(60, (opts.Width or 130) - 24), { MinSize = 9 })
 			if isOn then
 				local dot = newFrame({
 					Name = "Check",
@@ -1343,6 +1545,7 @@ function builders.Keybind(container, ctx, opts)
 	local function display()
 		box.Text = listening and "..." or (api.CurrentKeybind or "...")
 		stroke.Color = listening and theme.Accent or theme.StrokeSoft
+		fitLabel(box, width - 16, { MaxSize = 13, MinSize = 9 })
 	end
 
 	local function keyCode()
@@ -1399,6 +1602,17 @@ function builders.Keybind(container, ctx, opts)
 			callSafe(opts.Callback, newKeybind)
 		end
 		ctx.saveConfiguration()
+	end
+
+	--  updates the shown key without firing the callback and without saving;
+	--  used when the bind is changed from somewhere else (XClient:SetOpenKey)
+	function api:SetSilent(newKeybind)
+		newKeybind = tostring(newKeybind or "")
+		if newKeybind == "Enum.KeyCode.Unknown" then newKeybind = "" end
+		api.CurrentKeybind = newKeybind
+		api.Value = newKeybind
+		listening = false
+		display()
 	end
 
 	display()
@@ -1774,6 +1988,7 @@ function builders.Section(container, ctx, options)
 		Position = UDim2.new(0, 2, 0, 12),
 		Parent = holder,
 	})
+	fitLabel(title, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 12, { MinSize = 9 })
 
 	newFrame({
 		Name = "Line",
@@ -1792,6 +2007,7 @@ function builders.Section(container, ctx, options)
 		newName = tostring(newName or "")
 		api.Name = newName
 		title.Text = string.upper(newName)
+		fitLabel(title, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 12, { MaxSize = 12, MinSize = 9 })
 	end
 	return api
 end
@@ -1871,6 +2087,7 @@ function builders.Label(container, ctx, text, icon, color, ignoreTheme)
 		Position = UDim2.new(0, iconImage and 32 or 12, 0, 0),
 		Parent = holder,
 	})
+	fitLabel(title, (tonumber(ctx.rowWidth) or ROW_WIDTH) - (iconImage and 46 or 28), { MinSize = 9, Wrap = true })
 
 	local api = {
 		Type = "Label",
@@ -1891,6 +2108,7 @@ function builders.Label(container, ctx, text, icon, color, ignoreTheme)
 			title.Position = UDim2.new(0, 32, 0, 0)
 			title.Size = UDim2.new(1, -42, 1, 0)
 		end
+		fitLabel(title, (tonumber(ctx.rowWidth) or ROW_WIDTH) - (iconLabel.Visible and 46 or 28), { MaxSize = 13, MinSize = 9, Wrap = true })
 	end
 	return api
 end
@@ -1951,6 +2169,1806 @@ function builders.Paragraph(container, ctx, opts)
 	return api
 end
 
+--=========================================================================
+--  9b. EXTRA WIDGETS
+--  Interactive viewers that go beyond plain controls: a character readout
+--  (PlayerWidget), a picture with markers (Image), a crosshair / FOV pad, a
+--  live graph, progress, a stepper, segments, a wheel, an analog stick, a
+--  radar and chips.
+--  Every builder below keeps the contract of the ones above: it is called as
+--  (container, ctx, opts), returns the settings table and registers its flag,
+--  so these widgets also work inside a module's Settings flyout.
+--=========================================================================
+
+--  Canonical character regions shared by PlayerWidget / Image.
+local PLAYER_REGIONS = { "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg" }
+local REGION_ALIASES = {
+	head = "Head",
+	torso = "Torso", chest = "Torso", body = "Torso", core = "Torso", upper = "Torso",
+	leftarm = "LeftArm", la = "LeftArm", armleft = "LeftArm", left = "LeftArm",
+	rightarm = "RightArm", ra = "RightArm", armright = "RightArm", right = "RightArm",
+	leftleg = "LeftLeg", ll = "LeftLeg", legleft = "LeftLeg",
+	rightleg = "RightLeg", rl = "RightLeg", legright = "RightLeg",
+	all = "*", every = "*", everything = "*", any = "*",
+}
+local function canonicalRegion(name)
+	local key = tostring(name or ""):gsub("[%s_%-]", ""):lower()
+	return REGION_ALIASES[key] or tostring(name or "")
+end
+
+--  Nested option tables such as
+--      widget.Highlight.Torso = true
+--      widget.Skin.Head = Color3.fromRGB(240, 200, 60)
+--      picture.Marker.Torso = true
+--  write into a backing store and notify the widget, which repaints itself.
+--  That is what makes the picture react to the variable.
+local function reactiveWidgetTable(store, onChange)
+	local proxy = {}
+	setmetatable(proxy, {
+		__index = function(_, key)
+			local resolved = canonicalRegion(key)
+			if store[resolved] ~= nil then return store[resolved] end
+			return store[key]
+		end,
+		__newindex = function(_, key, value)
+			local resolved = canonicalRegion(key)
+			store[resolved] = value
+			if onChange then onChange(resolved, value) end
+		end,
+	})
+	return proxy
+end
+
+--  Default normalised marker points for the Image widget (rough R6 layout).
+local IMAGE_MARKER_POINTS = {
+	Head = { 0.5, 0.12 },
+	Torso = { 0.5, 0.42 },
+	LeftArm = { 0.24, 0.42 },
+	RightArm = { 0.76, 0.42 },
+	LeftLeg = { 0.4, 0.82 },
+	RightLeg = { 0.6, 0.82 },
+}
+
+--  Every viewer widget is a module row plus a stage below it.
+local function widgetStage(container, ctx, opts, stageHeight)
+	local theme = ctx.theme()
+	local wrapper = newFrame({
+		Name = opts.Name or "Widget",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, ROW_HEIGHT + stageHeight + 6),
+		Parent = container,
+	})
+	local base = newRow(wrapper, ctx, opts)
+	local stage = newFrame({
+		Name = "Stage",
+		BackgroundColor3 = theme.SurfaceAlt,
+		Size = UDim2.new(1, 0, 0, stageHeight),
+		Position = UDim2.fromOffset(0, ROW_HEIGHT + 6),
+		Parent = wrapper,
+	})
+	addCorner(stage, UDim.new(0, 6))
+	addStroke(stage, theme.StrokeSoft, 1, 0.3)
+	--  handy for scripts: widget.Stage is the frame under the module row
+	opts.Stage = stage
+	return base, stage, wrapper
+end
+
+--  Shared caption label inside a stage (status / hint lines).
+local function stageCaption(stage, text, ctx)
+	local label = newText({
+		Name = "Caption",
+		Text = tostring(text or ""),
+		TextSize = 11,
+		TextColor3 = ctx.theme().TextMuted,
+		Size = UDim2.new(1, -20, 0, 16),
+		Position = UDim2.new(0, 10, 1, -22),
+		Parent = stage,
+	})
+	fitLabel(label, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	return label
+end
+--  PlayerWidget -----------------------------------------------------------
+--  An interactive R6 style character: every body part is a picture *and* a
+--  variable, so a module can drive anything from it and the picture follows.
+--      local widget = Tab:CreatePlayerWidget({ Name = "Skin", Flag = "skin" })
+--      widget.Highlight.Torso = true          -- widget.Highlight.torso too
+--      widget.Skin.Head = Color3.fromRGB(255, 210, 80)
+--      widget:SetRegion("LeftLeg", true)
+--      widget.Highlight.All = false           -- clears every highlight
+--      print(widget.Highlight.Torso, widget:GetSelection()[1])
+function builders.PlayerWidget(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 166)
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "PlayerWidget"
+	api.Row = base.row
+	api.Base = base
+	api.Element = stage
+	api.Regions = {}
+	for index, region in ipairs(PLAYER_REGIONS) do api.Regions[index] = region end
+	--  grab the requested selection before api.Selected is replaced, because
+	--  the settings table handed in by the caller *is* the element (api == opts)
+	local initialSelection = opts.Selected or opts.CurrentValue
+	api.Selected = {}
+
+	local allowMultiple = opts.AllowMultiple ~= false
+	local state = {}     -- region -> true
+	local colors = {}    -- region -> Color3
+	local parts = {}     -- region -> button
+	local strokes = {}   -- region -> stroke
+
+	local function applySkinValue(name, color)
+		local target = canonicalRegion(name)
+		if target == "*" then
+			for _, region in ipairs(PLAYER_REGIONS) do colors[region] = color end
+		else
+			colors[target] = color
+		end
+	end
+
+	if opts.Skin ~= nil then
+		if typeof(opts.Skin) == "Color3" then
+			applySkinValue("*", opts.Skin)
+		elseif type(opts.Skin) == "table" then
+			for key, value in pairs(opts.Skin) do
+				if typeof(value) == "Color3" then applySkinValue(key, value) end
+			end
+		end
+	end
+	for _, region in ipairs(PLAYER_REGIONS) do
+		if colors[region] == nil then colors[region] = theme.Surface end
+	end
+
+	local rig = newFrame({
+		Name = "Rig",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(132, 116),
+		Position = UDim2.new(0.5, 0, 0, 6),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Parent = stage,
+	})
+
+	--  x, y, width, height inside the 132 x 116 rig
+	local LAYOUT = {
+		Head     = { 49, 0, 34, 30 },
+		Torso    = { 45, 34, 42, 44 },
+		LeftArm  = { 25, 36, 16, 42 },
+		RightArm = { 91, 36, 16, 42 },
+		LeftLeg  = { 47, 82, 18, 34 },
+		RightLeg = { 67, 82, 18, 34 },
+	}
+
+	for _, region in ipairs(PLAYER_REGIONS) do
+		local spec = LAYOUT[region]
+		local part = create("TextButton", {
+			Name = region,
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = colors[region],
+			Size = UDim2.fromOffset(spec[3], spec[4]),
+			Position = UDim2.fromOffset(spec[1], spec[2]),
+			Parent = rig,
+		})
+		addCorner(part, UDim.new(0, region == "Head" and 8 or 5))
+		strokes[region] = addStroke(part, theme.Stroke, 1, 0.2)
+		parts[region] = part
+
+		part.MouseEnter:Connect(function()
+			tween(part, 0.1, { BackgroundTransparency = 0.3 })
+		end)
+		part.MouseLeave:Connect(function()
+			tween(part, 0.1, { BackgroundTransparency = state[region] and 0.15 or 0 })
+		end)
+		part.MouseButton1Click:Connect(function()
+			local on = not (state[region] and true or false)
+			api:SetRegion(region, on)
+			callSafe(opts.Callback, region, on, api)
+			callSafe(opts.OnRegionChanged, region, on, api)
+			ctx.saveConfiguration()
+		end)
+	end
+
+	local caption = stageCaption(stage, "Selected: none", ctx)
+
+	local function paint()
+		local selected = api.Selected
+		for index = #selected, 1, -1 do selected[index] = nil end
+		for _, region in ipairs(PLAYER_REGIONS) do
+			local on = state[region] and true or false
+			local part = parts[region]
+			part.BackgroundColor3 = on and theme.Accent or colors[region]
+			part.BackgroundTransparency = on and 0.15 or 0
+			local stroke = strokes[region]
+			stroke.Color = on and theme.Accent or theme.Stroke
+			stroke.Thickness = on and 2 or 1
+			stroke.Transparency = on and 0 or 0.2
+			if on then selected[#selected + 1] = region end
+		end
+		api.Selected = selected
+		api.CurrentValue = selected
+		api.Value = selected
+		caption.Text = #selected > 0 and ("Selected: " .. table.concat(selected, ", ")) or "Selected: none"
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+	--  Live variables: writing to them repaints the character straight away.
+	api.Highlight = reactiveWidgetTable(state, function(region, value)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = value and true or nil end
+		end
+		paint()
+	end)
+	api.Skin = reactiveWidgetTable(colors, function(region, value)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do colors[entry] = value end
+		end
+		paint()
+	end)
+
+	function api:SetRegion(name, on)
+		local region = canonicalRegion(name)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = on and true or nil end
+		elseif LAYOUT[region] then
+			if on and not allowMultiple then
+				for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = nil end
+			end
+			state[region] = on and true or nil
+		end
+		paint()
+		return api
+	end
+
+	function api:GetRegion(name)
+		return state[canonicalRegion(name)] and true or false
+	end
+
+	function api:SetSkin(name, color)
+		applySkinValue(name, color)
+		paint()
+		return api
+	end
+
+	function api:GetSkin(name)
+		return colors[canonicalRegion(name)]
+	end
+
+	function api:GetSelection()
+		local copy = {}
+		for index, region in ipairs(api.Selected) do copy[index] = region end
+		return copy
+	end
+
+	function api:Clear()
+		for _, region in ipairs(PLAYER_REGIONS) do state[region] = nil end
+		paint()
+		return api
+	end
+
+	function api:Refresh()
+		paint()
+		return api
+	end
+
+	function api:Serialize()
+		return api:GetSelection()
+	end
+
+	--  :Set accepts the array a configuration stores, a single region name or
+	--  { Regions = { ... } / Highlight = { ... }, Skin = { ... } }
+	function api:ApplyValue(value)
+		local list = value
+		if type(value) == "table" then
+			if value.Regions ~= nil then
+				list = value.Regions
+			elseif value.Highlight ~= nil then
+				list = value.Highlight
+			end
+			if type(value.Skin) == "table" then
+				for key, color in pairs(value.Skin) do
+					if typeof(color) == "Color3" then applySkinValue(key, color) end
+				end
+			end
+		end
+		if list ~= nil then
+			for _, region in ipairs(PLAYER_REGIONS) do state[region] = nil end
+			if type(list) == "string" then list = { list } end
+			if type(list) == "table" then
+				for key, entry in pairs(list) do
+					local name = type(key) == "number" and entry or key
+					local on = type(key) == "number" and true or (entry and true or false)
+					local region = canonicalRegion(name)
+					if region == "*" then
+						for _, item in ipairs(PLAYER_REGIONS) do state[item] = on and true or nil end
+					elseif LAYOUT[region] then
+						state[region] = on and true or nil
+					end
+				end
+			end
+		end
+		paint()
+		return api
+	end
+
+	function api:SetSilent(value)
+		api:ApplyValue(value)
+		return api
+	end
+
+	function api:Set(value)
+		api:ApplyValue(value)
+		callSafe(opts.Callback, api:GetSelection(), nil, api)
+		ctx.saveConfiguration()
+		return api
+	end
+
+	api:ApplyValue(initialSelection)
+	registerFlag(ctx, opts, api.Selected, "PlayerWidget", api)
+	return api
+end
+--  Crosshair / FOV pad ----------------------------------------------------
+--      Tab:CreateCrosshair({ Name = "Aim FOV", Flag = "fov", FOV = 90,
+--          MaxFOV = 360, Dot = { X = 0.1, Y = -0.2 },
+--          Callback = function(value) end })   -- { FOV = , X = , Y = }
+--      crosshair.FOV = 120      crosshair:SetOffset(0, 0.5)
+--      crosshair:Set({ FOV = 45, X = 0, Y = 0 })
+--  Drag inside the pad to move the dot, the circle is the field of view.
+function builders.Crosshair(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 156)
+	local padSize = tonumber(opts.PadSize) or 108
+
+	local pad = newFrame({
+		Name = "Pad",
+		BackgroundColor3 = theme.Surface,
+		Size = UDim2.fromOffset(padSize, padSize),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Parent = stage,
+	})
+	addCorner(pad, UDim.new(0, 6))
+	addStroke(pad, theme.StrokeSoft, 1, 0.2)
+
+	local ring = newFrame({
+		Name = "FOV",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(44, 44),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	addCorner(ring, UDim.new(1, 0))
+	addStroke(ring, theme.Accent, 1, 0.35)
+
+	--  procedural crosshair: four ticks around the centre
+	local ticks = {}
+	for index = 1, 4 do
+		local vertical = index <= 2
+		ticks[index] = newFrame({
+			Name = "Tick" .. index,
+			BackgroundColor3 = theme.Text,
+			Size = vertical and UDim2.fromOffset(1.5, 9) or UDim2.fromOffset(9, 1.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Parent = pad,
+		})
+	end
+	local dot = newFrame({
+		Name = "Dot",
+		BackgroundColor3 = theme.Accent,
+		Size = UDim2.fromOffset(6, 6),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	addCorner(dot, UDim.new(1, 0))
+
+	local caption = stageCaption(stage, "", ctx)
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Crosshair"
+	api.Row = base.row
+	api.Base = base
+	api.Element = pad
+	api.MaxFOV = tonumber(opts.MaxFOV) or 360
+	api.FOV = math.clamp(tonumber(opts.FOV) or 90, 0, api.MaxFOV)
+	--  read the requested dot before api.Dot replaces it (api == opts)
+	local initialDot = type(opts.Dot) == "table" and opts.Dot or nil
+	api.Dot = { X = 0, Y = 0 }
+	if initialDot then
+		api.Dot.X = math.clamp(tonumber(initialDot.X) or 0, -1, 1)
+		api.Dot.Y = math.clamp(tonumber(initialDot.Y) or 0, -1, 1)
+	end
+	api.CurrentValue = { FOV = api.FOV, X = api.Dot.X, Y = api.Dot.Y }
+	api.Value = api.CurrentValue
+
+	local function paint()
+		local ratio = api.MaxFOV > 0 and (api.FOV / api.MaxFOV) or 0
+		local diameter = math.max(12, 12 + ratio * (padSize - 26))
+		ring.Size = UDim2.fromOffset(diameter, diameter)
+		local spread = 6 + ratio * 13
+		for index, tick in ipairs(ticks) do
+			local sign = (index % 2 == 0) and 1 or -1
+			if index <= 2 then
+				tick.Position = UDim2.new(0.5, 0, 0.5, sign * spread)
+			else
+				tick.Position = UDim2.new(0.5, sign * spread, 0.5, 0)
+			end
+		end
+		dot.Position = UDim2.new(0.5, api.Dot.X * (padSize / 2 - 10), 0.5, api.Dot.Y * (padSize / 2 - 10))
+		api.CurrentValue = { FOV = api.FOV, X = api.Dot.X, Y = api.Dot.Y }
+		api.Value = api.CurrentValue
+		caption.Text = string.format("FOV %d | X %.2f | Y %.2f", math.floor(api.FOV + 0.5), api.Dot.X, api.Dot.Y)
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	local dragging = false
+	local function updateFromPosition(position)
+		local abs = pad.AbsolutePosition or Vector2.new(0, 0)
+		local size = pad.AbsoluteSize
+		local width = (size and size.X and size.X > 0) and size.X or padSize
+		local height = (size and size.Y and size.Y > 0) and size.Y or padSize
+		local x = math.clamp(((position.X - abs.X) / width - 0.5) * 2, -1, 1)
+		local y = math.clamp(((position.Y - abs.Y) / height - 0.5) * 2, -1, 1)
+		api:SetOffset(x, y)
+	end
+
+	pad.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			updateFromPosition(input.Position)
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			updateFromPosition(input.Position)
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	function api:SetFOV(value, silent)
+		api.FOV = math.clamp(tonumber(value) or 0, 0, api.MaxFOV)
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentValue)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:SetOffset(x, y, silent)
+		api.Dot = {
+			X = math.clamp(tonumber(x) or 0, -1, 1),
+			Y = math.clamp(tonumber(y) or 0, -1, 1),
+		}
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentValue)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:GetFOV()
+		return api.FOV
+	end
+
+	function api:Serialize()
+		return { FOV = api.FOV, X = api.Dot.X, Y = api.Dot.Y }
+	end
+
+	function api:Set(value, silent)
+		if type(value) == "table" then
+			if value.FOV ~= nil then api.FOV = math.clamp(tonumber(value.FOV) or 0, 0, api.MaxFOV) end
+			if value.X ~= nil or value.Y ~= nil then
+				api.Dot = {
+					X = math.clamp(tonumber(value.X) or api.Dot.X, -1, 1),
+					Y = math.clamp(tonumber(value.Y) or api.Dot.Y, -1, 1),
+				}
+			end
+		elseif type(value) == "number" then
+			api.FOV = math.clamp(value, 0, api.MaxFOV)
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentValue)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:SetSilent(value)
+		return api:Set(value, true)
+	end
+
+	paint()
+	registerFlag(ctx, opts, api.CurrentValue, "Crosshair", api)
+	return api
+end
+--  Live graph -------------------------------------------------------------
+--      local graph = Tab:CreateGraph({ Name = "Ping", Max = 300, Samples = 40 })
+--      graph:Push(42)      graph:Set(120)      graph:Clear()
+--      print(graph.CurrentValue, graph:GetValues()[1])
+function builders.Graph(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 76)
+	local samples = math.max(4, tonumber(opts.Samples) or 40)
+	local min = tonumber(opts.Min) or 0
+	local max = tonumber(opts.Max) or 100
+	if max <= min then max = min + 1 end
+	local height = tonumber(opts.GraphHeight) or 44
+	local gap = 2
+
+	local plot = newFrame({
+		Name = "Plot",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -20, 0, height),
+		Position = UDim2.fromOffset(10, 8),
+		Parent = stage,
+	})
+
+	local bars = {}
+	for index = 1, samples do
+		local bar = newFrame({
+			Name = "Bar" .. index,
+			BackgroundColor3 = theme.Accent,
+			Size = UDim2.new(1 / samples, -gap, 0, 2),
+			Position = UDim2.new((index - 1) / samples, gap * 0.5, 1, 0),
+			AnchorPoint = Vector2.new(0, 1),
+			Parent = plot,
+		})
+		addCorner(bar, UDim.new(0, 2))
+		bars[index] = bar
+	end
+
+	local caption = stageCaption(stage, "", ctx)
+	local values = {}
+	for index = 1, samples do values[index] = min end
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Graph"
+	api.Row = base.row
+	api.Base = base
+	api.Element = plot
+	api.Samples = samples
+	api.Min = min
+	api.Max = max
+
+	local function paint()
+		local span = max - min
+		for index, bar in ipairs(bars) do
+			local ratio = math.clamp((values[index] - min) / span, 0, 1)
+			local pixels = math.max(1, math.floor(ratio * height + 0.5))
+			bar.Size = UDim2.new(1 / samples, -gap, 0, pixels)
+			bar.BackgroundColor3 = ratio > 0.66 and theme.Danger or (ratio > 0.33 and theme.Accent or theme.Success)
+		end
+		api.CurrentValue = values[samples]
+		api.Value = api.CurrentValue
+		caption.Text = string.format("now %.2f | range %s - %s | %d samples", api.CurrentValue or 0, tostring(min), tostring(max), samples)
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	local function shift(newValue)
+		for index = 1, samples - 1 do values[index] = values[index + 1] end
+		values[samples] = math.clamp(tonumber(newValue) or min, min, max)
+		paint()
+	end
+
+	function api:Push(newValue)
+		shift(newValue)
+		callSafe(opts.Callback, api.CurrentValue)
+		ctx.saveConfiguration()
+		return api
+	end
+
+	function api:Set(newValue)
+		return api:Push(newValue)
+	end
+
+	function api:SetSilent(newValue)
+		shift(newValue)
+		return api
+	end
+
+	function api:Clear()
+		for index = 1, samples do values[index] = min end
+		paint()
+		return api
+	end
+
+	function api:GetValues()
+		local copy = {}
+		for index = 1, samples do copy[index] = values[index] end
+		return copy
+	end
+
+	function api:Serialize()
+		return api.CurrentValue
+	end
+
+	paint()
+	registerFlag(ctx, opts, api.CurrentValue, "Graph", api)
+	return api
+end
+--  Progress / loader ------------------------------------------------------
+--      local loader = Tab:CreateProgress({ Name = "Loading", Flag = "load",
+--          Min = 0, Max = 100, Indeterminate = true })
+--      loader:Set(40)     loader:Tween(100, 0.6)     loader:Stop()
+--  Without Min/Max the value is a plain 0 - 1 fraction.
+function builders.Progress(container, ctx, opts)
+	local rawMin, rawMax = opts and opts.Min, opts and opts.Max
+	if opts and type(opts.Range) == "table" then
+		rawMin = rawMin or opts.Range[1]
+		rawMax = rawMax or opts.Range[2]
+	end
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 86)
+	local min = tonumber(rawMin) or 0
+	local max = tonumber(rawMax) or 1
+	if max <= min then max = min + 1 end
+	local value = math.clamp(tonumber(opts.CurrentValue) or min, min, max)
+	local width = tonumber(opts.Width) or 210
+	local barHeight = tonumber(opts.BarHeight) or 8
+
+	local track = newFrame({
+		Name = "Track",
+		BackgroundColor3 = theme.SliderTrack,
+		Size = UDim2.fromOffset(width, barHeight),
+		Position = UDim2.fromOffset(10, 18),
+		Parent = stage,
+	})
+	addCorner(track, UDim.new(1, 0))
+	local fill = newFrame({
+		Name = "Fill",
+		BackgroundColor3 = theme.Accent,
+		Size = UDim2.new(0, 0, 1, 0),
+		Parent = track,
+	})
+	addCorner(fill, UDim.new(1, 0))
+	local shimmer = newFrame({
+		Name = "Shimmer",
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+		BackgroundTransparency = 0.5,
+		Size = UDim2.new(0, 46, 1, 0),
+		Position = UDim2.new(0, -60, 0, 0),
+		Parent = track,
+	})
+	addCorner(shimmer, UDim.new(1, 0))
+	local percentText = newText({
+		Name = "Percent",
+		Text = "0%",
+		TextSize = 12,
+		Font = THEME_FONT_BOLD,
+		TextColor3 = theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Size = UDim2.fromOffset(70, 16),
+		Position = UDim2.new(1, -10, 0, 14),
+		Parent = stage,
+	})
+	local caption = stageCaption(stage, "", ctx)
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Progress"
+	api.Row = base.row
+	api.Base = base
+	api.Element = track
+	api.Min = min
+	api.Max = max
+	api.CurrentValue = value
+	api.Value = value
+	api.Running = false
+
+	local shimmerTween
+	local function paintText()
+		local alpha = math.clamp((value - min) / (max - min), 0, 1)
+		api.CurrentValue = value
+		api.Value = value
+		percentText.Text = string.format("%d%%", math.floor(alpha * 100 + 0.5))
+		caption.Text = api.Running and "loading..." or string.format("%s / %s", tostring(value), tostring(max))
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	local function paint(animate, time)
+		local alpha = math.clamp((value - min) / (max - min), 0, 1)
+		if animate then
+			tween(fill, time or 0.25, { Size = UDim2.new(alpha, 0, 1, 0) })
+		else
+			fill.Size = UDim2.new(alpha, 0, 1, 0)
+		end
+		paintText()
+	end
+
+	--  indeterminate mode keeps a bright segment sweeping the bar; the tween
+	--  loops inside the engine, so no Lua loop is left running
+	function api:Start()
+		if shimmerTween or not TweenService then return api end
+		api.Running = true
+		pcall(function()
+			local info = TweenInfo.new(1.1, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false)
+			shimmerTween = TweenService:Create(shimmer, info, { Position = UDim2.new(1, 10, 0, 0) })
+			shimmerTween:Play()
+		end)
+		paintText()
+		return api
+	end
+
+	function api:Stop()
+		api.Running = false
+		if shimmerTween then
+			pcall(function() shimmerTween:Cancel() end)
+			shimmerTween = nil
+		end
+		shimmer.Position = UDim2.new(0, -60, 0, 0)
+		paintText()
+		return api
+	end
+
+	function api:Set(newValue, silent)
+		value = math.clamp(tonumber(newValue) or min, min, max)
+		paint(true, 0.25)
+		if not silent then
+			callSafe(opts.Callback, value)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:SetSilent(newValue)
+		return api:Set(newValue, true)
+	end
+
+	function api:SetRatio(alpha, silent)
+		return api:Set(min + (max - min) * math.clamp(tonumber(alpha) or 0, 0, 1), silent)
+	end
+
+	function api:Tween(target, time, silent)
+		local targetValue = math.clamp(tonumber(target) or min, min, max)
+		local alpha = math.clamp((targetValue - min) / (max - min), 0, 1)
+		value = targetValue
+		tween(fill, tonumber(time) or 0.4, { Size = UDim2.new(alpha, 0, 1, 0) })
+		paintText()
+		if not silent then
+			callSafe(opts.Callback, value)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:Serialize()
+		return api.CurrentValue
+	end
+
+	paint(false)
+	if opts.Indeterminate or opts.Animated then api:Start() end
+	registerFlag(ctx, opts, value, "Progress", api)
+	return api
+end
+--  Stepper ----------------------------------------------------------------
+--      local step = Tab:CreateStepper({ Name = "Delay", Flag = "delay",
+--          Min = 0, Max = 1000, Increment = 25, Suffix = " ms" })
+--      step:Step(1)   step:Set(300)   print(step.CurrentValue)
+function builders.Stepper(container, ctx, opts)
+	local rawMin, rawMax = opts and opts.Min, opts and opts.Max
+	if opts and type(opts.Range) == "table" then
+		rawMin = rawMin or opts.Range[1]
+		rawMax = rawMax or opts.Range[2]
+	end
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base = newRow(container, ctx, opts)
+	local min = tonumber(rawMin) or 0
+	local max = tonumber(rawMax) or 100
+	local inc = tonumber(opts.Increment) or 1
+	local wrap = opts.Wrap and true or false
+	local suffix = opts.Suffix or ""
+	local value = math.clamp(tonumber(opts.CurrentValue) or min, min, max)
+	if max <= min then max = min + 1 end
+
+	local width = tonumber(opts.Width) or 132
+	local holder = newFrame({
+		Name = "Stepper",
+		BackgroundColor3 = theme.SurfaceAlt,
+		Size = UDim2.fromOffset(width, 26),
+		Parent = base.row,
+	})
+	addCorner(holder, UDim.new(0, 5))
+	addStroke(holder, theme.StrokeSoft, 1, 0)
+	fitControl(base, width)
+	holder.Position = UDim2.new(1, -(base.controlRight), 0.5, 0)
+	holder.AnchorPoint = Vector2.new(1, 0.5)
+
+	local minus = create("TextButton", {
+		Name = "Minus",
+		Text = "-",
+		Font = THEME_FONT_BOLD,
+		TextSize = 15,
+		TextColor3 = theme.TextMuted,
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(30, 26),
+		Parent = holder,
+	})
+	local plus = create("TextButton", {
+		Name = "Plus",
+		Text = "+",
+		Font = THEME_FONT_BOLD,
+		TextSize = 15,
+		TextColor3 = theme.TextMuted,
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(30, 26),
+		Position = UDim2.new(1, -30, 0, 0),
+		Parent = holder,
+	})
+	local valueText = newText({
+		Name = "Value",
+		Text = tostring(value) .. suffix,
+		TextSize = 12,
+		Font = THEME_FONT_BOLD,
+		TextColor3 = theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Size = UDim2.new(1, -60, 1, 0),
+		Position = UDim2.fromOffset(30, 0),
+		Parent = holder,
+	})
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Stepper"
+	api.Row = base.row
+	api.Base = base
+	api.Element = holder
+	api.Min = min
+	api.Max = max
+	api.Increment = inc
+	api.CurrentValue = value
+	api.Value = value
+
+	local function render()
+		api.CurrentValue = value
+		api.Value = value
+		valueText.Text = tostring(value) .. suffix
+		fitLabel(valueText, width - 66, { MaxSize = 13, MinSize = 9 })
+	end
+
+	function api:Set(newValue, silent)
+		value = math.clamp(tonumber(newValue) or min, min, max)
+		render()
+		if not silent then
+			callSafe(opts.Callback, value)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:SetSilent(newValue)
+		return api:Set(newValue, true)
+	end
+
+	function api:Step(direction, silent)
+		direction = tonumber(direction) or 1
+		local target = value + direction * inc
+		if wrap then
+			if target > max then target = min elseif target < min then target = max end
+		end
+		value = math.clamp(target, min, max)
+		render()
+		if not silent then
+			callSafe(opts.Callback, value)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:Increment(silent)
+		return api:Step(1, silent)
+	end
+
+	function api:Decrement(silent)
+		return api:Step(-1, silent)
+	end
+
+	function api:SetValue(newValue, silent)
+		return api:Set(newValue, silent)
+	end
+
+	function api:Serialize()
+		return api.CurrentValue
+	end
+
+	minus.MouseButton1Click:Connect(function() api:Step(-1) end)
+	plus.MouseButton1Click:Connect(function() api:Step(1) end)
+
+	render()
+	registerFlag(ctx, opts, value, "Stepper", api)
+	return api
+end
+--  Segmented control ------------------------------------------------------
+--      local mode = Tab:CreateSegment({ Name = "Mode", CurrentOption = "Legit",
+--          Options = { "Legit", "Rage", "Auto" } })
+--      mode:Set("Rage")     print(mode.CurrentOption)
+--      -- Multi = true turns it into a row of toggle chips below the caption
+function builders.Segment(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local options = opts.Options or {}
+	local multi = opts.Multi and true or false
+	local base = newRow(container, ctx, opts)
+	local rowWidth = base.rowWidth or ROW_WIDTH
+	local perLine = math.max(1, math.min(#options > 0 and #options or 1, tonumber(opts.PerLine) or 3))
+	local lines = math.max(1, math.ceil((#options > 0 and #options or 1) / perLine))
+	local stripHeight = lines * 24 + (lines - 1) * 6
+	base.row.Size = UDim2.new(1, 0, 0, (base.rowHeight or ROW_HEIGHT) + stripHeight + 6)
+
+	local strip = newFrame({
+		Name = "Strip",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -20, 0, stripHeight),
+		Position = UDim2.new(0, 10, 0, base.rowHeight or ROW_HEIGHT),
+		Parent = base.row,
+	})
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Segment"
+	api.Row = base.row
+	api.Base = base
+	api.Element = strip
+	api.Multi = multi
+
+	local buttons = {}
+	local selected = {}
+
+	local function isSelected(name)
+		if multi then return listFind(selected, name) ~= nil end
+		return api.CurrentOption == name
+	end
+
+	local function paint()
+		for name, button in pairs(buttons) do
+			local on = isSelected(name)
+			button.BackgroundColor3 = on and theme.Accent or theme.Surface
+			button.TextColor3 = on and theme.Background or theme.TextMuted
+		end
+		if multi then
+			local list = {}
+			for position, name in ipairs(selected) do list[position] = name end
+			api.CurrentOption = list
+			api.CurrentOptions = list
+		end
+		api.Value = api.CurrentOption
+	end
+
+	local function choose(name, silent)
+		if multi then
+			local position = listFind(selected, name)
+			if position then
+				table.remove(selected, position)
+			else
+				selected[#selected + 1] = name
+			end
+		elseif api.CurrentOption == name and opts.AllowDeselect then
+			api.CurrentOption = nil
+		else
+			api.CurrentOption = name
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentOption)
+			ctx.saveConfiguration()
+		end
+	end
+
+	local cell = 0
+	for _, name in ipairs(options) do
+		local line = math.floor(cell / perLine)
+		local column = cell % perLine
+		local button = create("TextButton", {
+			Name = tostring(name),
+			Text = tostring(name),
+			Font = THEME_FONT_BOLD,
+			TextSize = 12,
+			AutoButtonColor = false,
+			BackgroundColor3 = theme.Surface,
+			Size = UDim2.new(1 / perLine, -6, 0, 24),
+			Position = UDim2.new(column / perLine, 3, 0, line * 30),
+			Parent = strip,
+		})
+		addCorner(button, opts.Pill and UDim.new(1, 0) or UDim.new(0, 5))
+		fitLabel(button, (rowWidth - 20) / perLine - 14, { MaxSize = 13, MinSize = 9 })
+		buttons[name] = button
+		cell = cell + 1
+		button.MouseButton1Click:Connect(function() choose(name) end)
+	end
+
+	function api:Set(newValue, silent)
+		if multi then
+			for position = #selected, 1, -1 do selected[position] = nil end
+			if type(newValue) == "table" then
+				for _, name in ipairs(newValue) do
+					if buttons[name] then selected[#selected + 1] = name end
+				end
+			elseif newValue ~= nil and buttons[newValue] then
+				selected[#selected + 1] = newValue
+			end
+		else
+			api.CurrentOption = buttons[newValue] and newValue or nil
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentOption)
+		end
+		return api
+	end
+
+	function api:SetSilent(newValue)
+		return api:Set(newValue, true)
+	end
+
+	function api:Toggle(name, silent)
+		choose(name, silent)
+		return api
+	end
+
+	function api:GetSelection()
+		if multi then
+			local copy = {}
+			for position, name in ipairs(selected) do copy[position] = name end
+			return copy
+		end
+		return api.CurrentOption
+	end
+
+	function api:GetOptions()
+		local copy = {}
+		for position, name in ipairs(options) do copy[position] = name end
+		return copy
+	end
+
+	function api:Serialize()
+		if multi then return api:GetSelection() end
+		return api.CurrentOption
+	end
+
+	if multi then
+		local initial = opts.CurrentOption
+		if type(initial) == "table" then
+			for _, name in ipairs(initial) do
+				if buttons[name] then selected[#selected + 1] = name end
+			end
+		elseif initial ~= nil and buttons[initial] then
+			selected[#selected + 1] = initial
+		end
+	else
+		api.CurrentOption = (opts.CurrentOption ~= nil and buttons[opts.CurrentOption]) and opts.CurrentOption or options[1]
+	end
+
+	paint()
+	registerFlag(ctx, opts, api.CurrentOption, "Segment", api)
+	return api
+end
+--  Wheel ------------------------------------------------------------------
+--      local wheel = Tab:CreateWheel({ Name = "Hitbox", CurrentOption = "Head",
+--          Options = { "Head", "Torso", "Nearest" } })
+--      wheel:Next()   wheel:Previous()   wheel:Set("Torso")
+--  Three options are visible at once, the middle one is the active choice.
+function builders.Wheel(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base = newRow(container, ctx, opts)
+	local options = opts.Options or {}
+	local index = 1
+	for position, name in ipairs(options) do
+		if name == opts.CurrentOption then index = position end
+	end
+
+	local width = tonumber(opts.Width) or 150
+	local holder = newFrame({
+		Name = "Wheel",
+		BackgroundColor3 = theme.SurfaceAlt,
+		Size = UDim2.fromOffset(width, 64),
+		Parent = base.row,
+	})
+	addCorner(holder, UDim.new(0, 5))
+	addStroke(holder, theme.StrokeSoft, 1, 0)
+	fitControl(base, width)
+	holder.Position = UDim2.new(1, -(base.controlRight), 0.5, 0)
+	holder.AnchorPoint = Vector2.new(1, 0.5)
+
+	local entries = {}
+	for slot = 1, 3 do
+		entries[slot] = newText({
+			Name = "Slot" .. slot,
+			Text = "-",
+			TextSize = 12,
+			Font = THEME_FONT_BOLD,
+			TextColor3 = theme.TextDim,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Size = UDim2.new(1, -30, 0, 18),
+			Position = UDim2.new(0, 15, 0, 5 + (slot - 1) * 19),
+			Parent = holder,
+		})
+	end
+
+	local up = create("TextButton", {
+		Name = "Up",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(16, 64),
+		Parent = holder,
+	})
+	local down = create("TextButton", {
+		Name = "Down",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(16, 64),
+		Position = UDim2.new(1, -16, 0, 0),
+		Parent = holder,
+	})
+	local upChevron = makeChevron(up, theme.TextMuted, 9, true)
+	upChevron.Position = UDim2.fromScale(0.5, 0.5)
+	upChevron.AnchorPoint = Vector2.new(0.5, 0.5)
+	local downChevron = makeChevron(down, theme.TextMuted, 9, false)
+	downChevron.Position = UDim2.fromScale(0.5, 0.5)
+	downChevron.AnchorPoint = Vector2.new(0.5, 0.5)
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Wheel"
+	api.Row = base.row
+	api.Base = base
+	api.Element = holder
+	api.Options = options
+
+	local function paint()
+		local count = #options
+		for slot = -1, 1 do
+			local entry = entries[slot + 2]
+			local middle = slot == 0
+			local position = index + slot
+			if count == 0 then
+				entry.Text = "-"
+			else
+				while position < 1 do position = position + count end
+				while position > count do position = position - count end
+				entry.Text = tostring(options[position])
+			end
+			entry.TextColor3 = middle and theme.Accent or theme.TextDim
+			entry.TextSize = middle and 13 or 11
+			fitLabel(entry, width - 40, { MaxSize = middle and 14 or 12, MinSize = 9 })
+		end
+		api.CurrentOption = options[index]
+		api.Value = api.CurrentOption
+	end
+
+	local function step(direction, silent)
+		local count = #options
+		if count == 0 then return api end
+		index = index + direction
+		while index < 1 do index = index + count end
+		while index > count do index = index - count end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentOption)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:Next(silent)
+		return step(1, silent)
+	end
+
+	function api:Previous(silent)
+		return step(-1, silent)
+	end
+
+	function api:Set(name, silent)
+		for position, option in ipairs(options) do
+			if option == name then index = position end
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentOption)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:SetSilent(name)
+		return api:Set(name, true)
+	end
+
+	function api:SetIndex(position, silent)
+		index = math.clamp(tonumber(position) or 1, 1, math.max(1, #options))
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.CurrentOption)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:GetIndex()
+		return index
+	end
+
+	function api:GetOptions()
+		local copy = {}
+		for position, option in ipairs(options) do copy[position] = option end
+		return copy
+	end
+
+	function api:Serialize()
+		return api.CurrentOption
+	end
+
+	up.MouseButton1Click:Connect(function() step(-1) end)
+	down.MouseButton1Click:Connect(function() step(1) end)
+
+	paint()
+	registerFlag(ctx, opts, api.CurrentOption, "Wheel", api)
+	return api
+end
+--  Analog stick -----------------------------------------------------------
+--      local stick = Tab:CreateAnalog({ Name = "Movement", Flag = "move",
+--          Deadzone = 0.1 })
+--      stick:Set(0, 1)      stick:Center()      print(stick.CurrentValue.Magnitude)
+function builders.Analog(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 156)
+	local padSize = tonumber(opts.PadSize) or 108
+	local deadzone = tonumber(opts.Deadzone) or 0.08
+
+	local pad = newFrame({
+		Name = "Pad",
+		BackgroundColor3 = theme.Surface,
+		Size = UDim2.fromOffset(padSize, padSize),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Parent = stage,
+	})
+	addCorner(pad, UDim.new(1, 0))
+	addStroke(pad, theme.StrokeSoft, 1, 0.2)
+	newFrame({
+		Name = "GuideX",
+		BackgroundColor3 = theme.StrokeSoft,
+		Size = UDim2.new(1, -18, 0, 1),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	newFrame({
+		Name = "GuideY",
+		BackgroundColor3 = theme.StrokeSoft,
+		Size = UDim2.fromOffset(1, padSize - 18),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	local knob = newFrame({
+		Name = "Knob",
+		BackgroundColor3 = theme.Accent,
+		Size = UDim2.fromOffset(26, 26),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	addCorner(knob, UDim.new(1, 0))
+	local caption = stageCaption(stage, "", ctx)
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Analog"
+	api.Row = base.row
+	api.Base = base
+	api.Element = pad
+	api.Deadzone = deadzone
+	--  read the requested position before api.CurrentValue replaces it
+	local initialAnalog = type(opts.CurrentValue) == "table" and opts.CurrentValue or nil
+	api.CurrentValue = { X = 0, Y = 0, Magnitude = 0 }
+	api.Value = api.CurrentValue
+	if initialAnalog then
+		api.CurrentValue.X = math.clamp(tonumber(initialAnalog.X) or 0, -1, 1)
+		api.CurrentValue.Y = math.clamp(tonumber(initialAnalog.Y) or 0, -1, 1)
+	end
+
+	local function paint()
+		local value = api.CurrentValue
+		local magnitude = math.min(1, math.sqrt(value.X * value.X + value.Y * value.Y))
+		value.Magnitude = magnitude
+		api.Value = value
+		local travel = padSize / 2 - 14
+		knob.Position = UDim2.new(0.5, value.X * travel, 0.5, value.Y * travel)
+		knob.BackgroundColor3 = magnitude > deadzone and theme.Accent or theme.TextMuted
+		caption.Text = string.format("X %.2f | Y %.2f | magnitude %.2f", value.X, value.Y, magnitude)
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	local function commit(x, y, silent)
+		local value = api.CurrentValue
+		value.X = math.clamp(tonumber(x) or 0, -1, 1)
+		value.Y = math.clamp(tonumber(y) or 0, -1, 1)
+		paint()
+		if not silent then
+			callSafe(opts.Callback, value)
+			ctx.saveConfiguration()
+		end
+	end
+
+	local dragging = false
+	local function updateFromPosition(position)
+		local abs = pad.AbsolutePosition or Vector2.new(0, 0)
+		local size = pad.AbsoluteSize
+		local width = (size and size.X and size.X > 0) and size.X or padSize
+		local height = (size and size.Y and size.Y > 0) and size.Y or padSize
+		local x = math.clamp(((position.X - abs.X) / width - 0.5) * 2, -1, 1)
+		local y = math.clamp(((position.Y - abs.Y) / height - 0.5) * 2, -1, 1)
+		commit(x, y)
+	end
+
+	pad.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			updateFromPosition(input.Position)
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			updateFromPosition(input.Position)
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	function api:Set(x, y, silent)
+		if type(x) == "table" then
+			commit(tonumber(x.X) or 0, tonumber(x.Y) or 0, silent or y)
+		else
+			commit(x, y, silent)
+		end
+		return api
+	end
+
+	function api:SetSilent(x, y)
+		return api:Set(x, y, true)
+	end
+
+	function api:Center()
+		return api:Set(0, 0)
+	end
+
+	function api:GetMagnitude()
+		return api.CurrentValue.Magnitude or 0
+	end
+
+	function api:IsActive()
+		return (api.CurrentValue.Magnitude or 0) > deadzone
+	end
+
+	function api:Serialize()
+		return { X = api.CurrentValue.X, Y = api.CurrentValue.Y }
+	end
+
+	paint()
+	registerFlag(ctx, opts, api.CurrentValue, "Analog", api)
+	return api
+end
+--  Chips ------------------------------------------------------------------
+--      local chips = Tab:CreateChips({ Name = "Bones", Flag = "bones",
+--          Options = { "Head", "Torso", "Arms" }, CurrentOptions = { "Head" } })
+--      chips:Toggle("Arms")     chips:Set({ "Head", "Torso" })
+--  A compact multi select strip: the same engine as Segment with Multi = true
+--  drawn as rounded pills, plus the chips style option names.
+function builders.Chips(container, ctx, opts)
+	opts = opts or {}
+	if opts.Multi == nil then opts.Multi = true end
+	opts.Pill = true
+	opts.PerLine = opts.PerLine or 3
+	if opts.CurrentOptions ~= nil and opts.CurrentOption == nil then
+		opts.CurrentOption = opts.CurrentOptions
+	end
+
+	local api = builders.Segment(container, ctx, opts)
+	api.Type = "Chips"
+	api.Chips = true
+	api.Options = opts.Options or {}
+	api.CurrentOptions = api.CurrentOption
+	return api
+end
+--  Radar ------------------------------------------------------------------
+--      local radar = Tab:CreateRadar({ Name = "Radar", Max = 24 })
+--      radar:Push({ X = 0.2, Y = -0.4, Color = Color3.fromRGB(255, 90, 90) })
+--      radar:SetBlips({ { X = 0, Y = 0.6 } })     radar:Clear()
+--  Blips are normalised: X / Y of 1 sits on the outer ring.
+function builders.Radar(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 156)
+	local size = tonumber(opts.PadSize) or 108
+
+	local pad = newFrame({
+		Name = "Pad",
+		BackgroundColor3 = theme.Surface,
+		Size = UDim2.fromOffset(size, size),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Parent = stage,
+	})
+	addCorner(pad, UDim.new(1, 0))
+	addStroke(pad, theme.StrokeSoft, 1, 0.2)
+
+	for ringIndex = 1, 2 do
+		local scale = ringIndex == 1 and 0.66 or 0.33
+		local ring = newFrame({
+			Name = "Ring" .. ringIndex,
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(size * scale, size * scale),
+			Position = UDim2.fromScale(0.5, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Parent = pad,
+		})
+		addCorner(ring, UDim.new(1, 0))
+		addStroke(ring, theme.StrokeSoft, 1, 0.4)
+	end
+	newFrame({
+		Name = "CrossX",
+		BackgroundColor3 = theme.StrokeSoft,
+		Size = UDim2.new(1, -18, 0, 1),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	newFrame({
+		Name = "CrossY",
+		BackgroundColor3 = theme.StrokeSoft,
+		Size = UDim2.fromOffset(1, size - 18),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+
+	--  the sweep turns inside a square holder, so it rotates about the centre
+	local sweepHolder = newFrame({
+		Name = "SweepHolder",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(size, size),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = pad,
+	})
+	newFrame({
+		Name = "Sweep",
+		BackgroundColor3 = theme.Accent,
+		BackgroundTransparency = 0.2,
+		Size = UDim2.fromOffset(size / 2 - 8, 1.6),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = sweepHolder,
+	})
+	local blipHolder = newFrame({
+		Name = "Blips",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Parent = pad,
+	})
+	local caption = stageCaption(stage, "", ctx)
+
+	--  the sweep loops inside the engine, so nothing keeps ticking in Lua
+	if TweenService and opts.Sweep ~= false then
+		pcall(function()
+			local info = TweenInfo.new(tonumber(opts.SweepTime) or 2.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false)
+			TweenService:Create(sweepHolder, info, { Rotation = 360 }):Play()
+		end)
+	end
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Radar"
+	api.Row = base.row
+	api.Base = base
+	api.Element = pad
+	api.Max = tonumber(opts.Max) or 24
+	--  capture the requested blips before api.Blips replaces the table
+	local initialBlips = opts.Blips
+	api.Blips = {}
+	api.CurrentValue = api.Blips
+	api.Value = api.Blips
+
+	local dots = {}
+	local function paint()
+		local span = size / 2 - 12
+		for index, blip in ipairs(api.Blips) do
+			local dot = dots[index]
+			if not dot then
+				dot = newFrame({
+					Name = "Blip" .. index,
+					BackgroundColor3 = theme.Danger,
+					Size = UDim2.fromOffset(8, 8),
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Parent = blipHolder,
+				})
+				addCorner(dot, UDim.new(1, 0))
+				addStroke(dot, theme.Background, 1, 0.2)
+				dots[index] = dot
+			end
+			local x = math.clamp(tonumber(blip.X) or 0, -1, 1)
+			local y = math.clamp(tonumber(blip.Y) or 0, -1, 1)
+			dot.Position = UDim2.new(0.5, x * span, 0.5, y * span)
+			dot.BackgroundColor3 = typeof(blip.Color) == "Color3" and blip.Color or theme.Danger
+			local dotSize = tonumber(blip.Size) or 8
+			dot.Size = UDim2.fromOffset(dotSize, dotSize)
+			dot.Visible = true
+		end
+		for index = #api.Blips + 1, #dots do
+			if dots[index] then dots[index].Visible = false end
+		end
+		caption.Text = string.format("%d blip(s) | limit %d", #api.Blips, api.Max)
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	function api:SetBlips(list)
+		api.Blips = {}
+		if type(list) == "table" then
+			for _, blip in ipairs(list) do
+				if type(blip) == "table" then api.Blips[#api.Blips + 1] = blip end
+			end
+		end
+		api.CurrentValue = api.Blips
+		api.Value = api.Blips
+		paint()
+		return api
+	end
+
+	function api:Push(blip)
+		if type(blip) ~= "table" then return api end
+		api.Blips[#api.Blips + 1] = blip
+		while #api.Blips > api.Max do table.remove(api.Blips, 1) end
+		api.CurrentValue = api.Blips
+		api.Value = api.Blips
+		paint()
+		callSafe(opts.Callback, blip)
+		return api
+	end
+
+	function api:GetBlips()
+		local copy = {}
+		for index, blip in ipairs(api.Blips) do copy[index] = blip end
+		return copy
+	end
+
+	function api:Clear()
+		api.Blips = {}
+		api.CurrentValue = api.Blips
+		api.Value = api.Blips
+		paint()
+		return api
+	end
+
+	api:SetBlips(initialBlips)
+	registerFlag(ctx, opts, api.Blips, "Radar", api)
+	return api
+end
+--  Image with markers -----------------------------------------------------
+--      local skin = Tab:CreateImage({ Name = "Skin preview", Flag = "skin",
+--          Image = 4483362458, Height = 140,
+--          Points = { Torso = { 0.5, 0.38 } } })
+--      skin.Marker.Torso = true        skin.Marker.head = true
+--      skin:SetMarker("LeftLeg", true) skin:AddPoint("Gun", 0.8, 0.3)
+--      skin:SetTint(Color3.fromRGB(200, 220, 255))
+--  Anything written into skin.Marker / skin.Points repaints the picture, which
+--  makes it perfect to visualise a skin while other variables change.
+function builders.Image(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 150)
+
+	local picture = create("ImageLabel", {
+		Name = "Picture",
+		BackgroundColor3 = theme.Surface,
+		BackgroundTransparency = 0.15,
+		ImageColor3 = theme.Text,
+		Size = UDim2.new(1, -20, 1, -34),
+		Position = UDim2.fromOffset(10, 8),
+		Parent = stage,
+	})
+	addCorner(picture, UDim.new(0, 6))
+	addStroke(picture, theme.StrokeSoft, 1, 0.3)
+	applyIcon(picture, opts.Image or opts.Icon or opts.Url)
+
+	local holder = newFrame({
+		Name = "Markers",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Parent = picture,
+	})
+	local caption = stageCaption(stage, "", ctx)
+
+	--  normalised marker points (0 - 1 across the picture)
+	local points = {}
+	for _, region in ipairs(PLAYER_REGIONS) do
+		local point = IMAGE_MARKER_POINTS[region]
+		points[region] = { point[1], point[2] }
+	end
+	if type(opts.Points) == "table" then
+		for key, value in pairs(opts.Points) do
+			if type(value) == "table" then
+				points[canonicalRegion(key)] = { tonumber(value[1]) or 0.5, tonumber(value[2]) or 0.5 }
+			end
+		end
+	end
+
+	local markers = {}   -- region -> dot
+	local active = {}    -- region -> true | Color3
+
+	local function ensureMarker(region)
+		if markers[region] then return markers[region] end
+		local point = points[region] or { 0.5, 0.5 }
+		local dot = newFrame({
+			Name = "Marker_" .. tostring(region),
+			BackgroundColor3 = theme.Accent,
+			Size = UDim2.fromOffset(10, 10),
+			Position = UDim2.fromScale(point[1], point[2]),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Parent = holder,
+		})
+		addCorner(dot, UDim.new(1, 0))
+		addStroke(dot, theme.Background, 1.5, 0)
+		markers[region] = dot
+		return dot
+	end
+
+	--  The settings table handed in by the caller is the element (as always).
+	local api = opts
+	api.Type = "Image"
+	api.Row = base.row
+	api.Base = base
+	api.Element = picture
+	api.Points = points
+	--  capture the requested markers before api.Marked replaces the table
+	local initialMarkers = opts.Marked or opts.CurrentValue
+	api.Marked = {}
+
+	local function paint()
+		local marked = {}
+		for region, state in pairs(active) do
+			if state then
+				local dot = ensureMarker(region)
+				local point = points[region] or { 0.5, 0.5 }
+				dot.Position = UDim2.fromScale(point[1], point[2])
+				dot.BackgroundColor3 = typeof(state) == "Color3" and state or theme.Accent
+				dot.Visible = true
+				marked[#marked + 1] = region
+			elseif markers[region] then
+				markers[region].Visible = false
+			end
+		end
+		table.sort(marked)
+		api.Marked = marked
+		api.CurrentValue = marked
+		api.Value = marked
+		caption.Text = #marked > 0 and ("marked: " .. table.concat(marked, ", ")) or "no markers"
+		fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 12, MinSize = 9 })
+	end
+
+	--  live variables: writing to them repaints the picture straight away
+	api.Marker = reactiveWidgetTable(active, function(region, value)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do active[entry] = value end
+		end
+		paint()
+	end)
+
+	function api:SetImage(icon)
+		applyIcon(picture, icon)
+		return api
+	end
+
+	function api:SetTint(color)
+		if typeof(color) == "Color3" then picture.ImageColor3 = color end
+		return api
+	end
+
+	function api:SetTransparency(value)
+		picture.ImageTransparency = math.clamp(tonumber(value) or 0, 0, 1)
+		return api
+	end
+
+	function api:AddPoint(name, x, y)
+		points[canonicalRegion(name)] = {
+			math.clamp(tonumber(x) or 0.5, 0, 1),
+			math.clamp(tonumber(y) or 0.5, 0, 1),
+		}
+		paint()
+		return api
+	end
+
+	function api:RemovePoint(name)
+		points[canonicalRegion(name)] = nil
+		return api
+	end
+
+	function api:SetMarker(name, state, silent)
+		local region = canonicalRegion(name)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do active[entry] = state end
+		else
+			active[region] = state
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, region, state, api)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:IsMarked(name)
+		return active[canonicalRegion(name)] and true or false
+	end
+
+	function api:ClearMarkers()
+		for region in pairs(active) do active[region] = nil end
+		for _, dot in pairs(markers) do dot.Visible = false end
+		paint()
+		return api
+	end
+
+	function api:GetMarked()
+		local copy = {}
+		for index, region in ipairs(api.Marked) do copy[index] = region end
+		return copy
+	end
+
+	function api:SetMarkers(list, silent)
+		for region in pairs(active) do active[region] = nil end
+		if type(list) == "table" then
+			for _, name in ipairs(list) do active[canonicalRegion(name)] = true end
+		elseif list ~= nil then
+			active[canonicalRegion(list)] = true
+		end
+		paint()
+		if not silent then
+			callSafe(opts.Callback, api.Marked, nil, api)
+			ctx.saveConfiguration()
+		end
+		return api
+	end
+
+	function api:Set(list, silent)
+		return api:SetMarkers(list, silent)
+	end
+
+	function api:SetSilent(list)
+		return api:SetMarkers(list, true)
+	end
+
+	function api:Serialize()
+		return api:GetMarked()
+	end
+
+	api:SetMarkers(initialMarkers, true)
+	registerFlag(ctx, opts, api.Marked, "Image", api)
+	return api
+end
 --=========================================================================
 --  10. THEME RESOLUTION (names used by the previous interface still work)
 --=========================================================================
@@ -2091,6 +4109,12 @@ local function serializeFlags()
 				data[flag] = tostring(element.CurrentValue or "")
 			elseif elementType == "Slider" then
 				data[flag] = element.CurrentValue
+			elseif type(element.Serialize) == "function" then
+				--  The extended widgets (section 9b) describe their own saved
+				--  shape: PlayerWidget -> region list, Crosshair -> { FOV, X, Y },
+				--  Analog -> { X, Y }, Stepper / Graph / Progress -> number, ...
+				local ok, serialized = pcall(element.Serialize, element)
+				if ok then data[flag] = serialized end
 			end
 		end
 	end
@@ -2335,6 +4359,12 @@ function XClient:CreateWindow(settings)
 	addCorner(root, UDim.new(0, 10))
 	local rootStroke = addStroke(root, currentTheme.Stroke, 1, 0.25)
 
+	--  The window slides + scales into place instead of popping in.
+	local rootScale = create("UIScale", { Scale = 0.94, Parent = root })
+	root.Position = UDim2.new(0.5, 0, 0.5, 16)
+	tween(rootScale, 0.3, { Scale = 1 })
+	tween(root, 0.3, { Position = UDim2.new(0.5, 0, 0.5, 0) })
+
 	--  Topbar ----------------------------------------------------------
 	local topbar = newFrame({
 		Name = "Topbar",
@@ -2411,6 +4441,9 @@ function XClient:CreateWindow(settings)
 		popup = nil,
 		theme = function() return currentTheme end,
 		saveConfiguration = function() saveConfiguration() end,
+		--  width available to a module row (used to fit captions); the flyout
+		--  swaps this for its own narrower width while it is being populated
+		rowWidth = WINDOW_WIDTH - RAIL_WIDTH - 26,
 	}
 
 	ctx.closePopup = function()
@@ -2497,11 +4530,17 @@ function XClient:CreateWindow(settings)
 		flyoutBody:ClearAllChildren()
 		addList(flyoutBody, { Padding = UDim.new(0, 6) })
 		flyoutTitle.Text = tostring(heading or "Settings")
+		fitLabel(flyoutTitle, PANEL_WIDTH - 46, { MinSize = 10 })
 		flyout.Visible = true
 		flyout.Position = UDim2.fromOffset(-(PANEL_WIDTH + PANEL_GAP), 0)
 		flyoutOpen = true
 		tween(flyout, 0.2, { Position = UDim2.fromOffset(-(PANEL_WIDTH + PANEL_GAP - 4), 0) })
+		--  rows inside the flyout are much narrower than tab rows, so the
+		--  caption fitting is told about that smaller width while populating
+		local previousWidth = ctx.rowWidth
+		ctx.rowWidth = PANEL_WIDTH - 12
 		if populate then populate(flyoutBody) end
+		ctx.rowWidth = previousWidth
 	end
 
 	flyoutClose.MouseButton1Click:Connect(closeFlyout)
@@ -2510,7 +4549,7 @@ function XClient:CreateWindow(settings)
 	local function buildModuleSettings(container, base)
 		local list = base.opts and base.opts.Settings
 		if type(list) ~= "table" then return end
-		newText({
+		local heading = newText({
 			Name = "Heading",
 			Text = string.upper(tostring(base.opts.Name or "Module")),
 			Font = THEME_FONT_BOLD,
@@ -2519,6 +4558,7 @@ function XClient:CreateWindow(settings)
 			Size = UDim2.new(1, 0, 0, 15),
 			Parent = container,
 		})
+		fitLabel(heading, PANEL_WIDTH - 24, { MinSize = 9, Wrap = true })
 		for _, descriptor in ipairs(list) do
 			if type(descriptor) == "table" then
 				local elementType = descriptor.Type or "Toggle"
@@ -2552,13 +4592,69 @@ function XClient:CreateWindow(settings)
 	--  Global settings panel (topbar gear / configuration manager) --------
 	local openGlobalSettings
 	local repaint
-	local toggleKey = settings.ToggleUIKeybind
-	if typeof(toggleKey) == "EnumItem" then toggleKey = toggleKey.Name end
-	if type(toggleKey) == "string" and toggleKey ~= "" then
-		toggleKey = string.upper(toggleKey)
-	else
-		toggleKey = "K"
+
+	--  Menu open key ----------------------------------------------------
+	--  Resolution order:
+	--      CreateWindow{ OpenKey = "K" }   (aliases: DefaultOpenKey,
+	--      DefaultKey, MenuKey, OpenKeybind, ToggleKey, ToggleUIKeybind)
+	--          -> XClient.OpenKey (library default)
+	--              -> "K"
+	--  The bind appears in the settings panel as "Menu open key", is stored in
+	--  the configuration like any other flag and can be changed with
+	--  XClient:SetOpenKey("K") or Window:SetOpenKey("K").
+	local function normalizeKey(value)
+		if value == nil then return nil end
+		if typeof(value) == "EnumItem" then return string.upper(value.Name) end
+		if type(value) == "string" and value ~= "" then return string.upper(value) end
+		return nil
 	end
+
+	local toggleKey = normalizeKey(settings.OpenKey)
+		or normalizeKey(settings.DefaultOpenKey)
+		or normalizeKey(settings.DefaultKey)
+		or normalizeKey(settings.MenuKey)
+		or normalizeKey(settings.OpenKeybind)
+		or normalizeKey(settings.ToggleKey)
+		or normalizeKey(settings.ToggleUIKeybind)
+		or normalizeKey(XClient.OpenKey)
+		or "K"
+
+	local openKeyRow
+	local openKeyHint
+
+	--  The menu key is registered as a flag element up front, so a saved
+	--  configuration can restore the bind even when the settings panel was
+	--  never opened in this session.
+	local openKeyElement = {
+		Type = "Keybind",
+		Flag = "xclient_open_key",
+		Name = "Menu open key",
+		CurrentKeybind = toggleKey,
+		Value = toggleKey,
+	}
+
+	local function setOpenKey(value)
+		local key = normalizeKey(value) or ""
+		toggleKey = key
+		openKeyElement.CurrentKeybind = key
+		openKeyElement.Value = key
+		XClient.OpenKey = key
+		if openKeyRow and openKeyRow.SetSilent then openKeyRow:SetSilent(key) end
+		if openKeyHint then
+			openKeyHint.Text = key ~= ""
+				and ("Press " .. key .. " to show or hide the interface")
+				or "No menu key bound"
+			fitLabel(openKeyHint, PANEL_WIDTH - 24, { MaxSize = 12, MinSize = 9, Wrap = true })
+		end
+	end
+
+	function openKeyElement:Set(value) setOpenKey(value) end
+	function openKeyElement:SetSilent(value) setOpenKey(value) end
+	function openKeyElement:Get() return toggleKey end
+
+	registerFlag(ctx, openKeyElement, toggleKey, "Keybind", openKeyElement)
+	openKeySetters[#openKeySetters + 1] = setOpenKey
+	ctx.setOpenKey = setOpenKey
 
 	local function currentThemeName()
 		for name, palette in pairs(Themes) do
@@ -2655,7 +4751,7 @@ function XClient:CreateWindow(settings)
 				})
 				return
 			end
-			newText({
+			local savedHeading = newText({
 				Name = "Heading",
 				Text = "SAVED",
 				Font = THEME_FONT_BOLD,
@@ -2664,6 +4760,7 @@ function XClient:CreateWindow(settings)
 				Size = UDim2.new(1, 0, 0, 15),
 				Parent = listHolder,
 			})
+			fitLabel(savedHeading, PANEL_WIDTH - 24, { MinSize = 9 })
 			for _, name in ipairs(configs) do
 				builders.Button(listHolder, ctx, {
 					Name = name,
@@ -2679,11 +4776,47 @@ function XClient:CreateWindow(settings)
 
 		--  Interface --------------------------------------------------
 		builders.Section(container, ctx, "Interface")
-		builders.Keybind(container, ctx, {
-			Name = "Toggle interface",
+
+		openKeyRow = builders.Keybind(container, ctx, {
+			Name = "Menu open key",
+			Description = "Shows and hides the whole menu",
 			CurrentKeybind = toggleKey,
 			CallOnChange = true,
-			Callback = function(key) toggleKey = key end,
+			Callback = function(key) setOpenKey(key) end,
+		})
+
+		openKeyHint = newText({
+			Name = "OpenKeyHint",
+			Text = toggleKey ~= "" and ("Press " .. toggleKey .. " to show or hide the interface") or "No menu key bound",
+			TextSize = 11,
+			TextColor3 = currentTheme.TextDim,
+			TextWrapped = true,
+			Size = UDim2.new(1, 0, 0, 26),
+			Parent = container,
+		})
+		fitLabel(openKeyHint, PANEL_WIDTH - 24, { MinSize = 9, Wrap = true })
+
+		builders.Button(container, ctx, {
+			Name = "Reset open key to K",
+			Callback = function()
+				setOpenKey("K")
+				XClient:Notify({ Title = "XClient", Content = "Menu open key reset to K." })
+			end,
+		})
+
+		--  Font -------------------------------------------------------
+		builders.Section(container, ctx, "Font")
+		builders.Dropdown(container, ctx, {
+			Name = "Interface font",
+			Description = "CS = condensed HUD type",
+			Options = { "CS", "Classic", "Mono" },
+			CurrentOption = XClient.Font,
+			Callback = function(value)
+				local name = type(value) == "table" and value[1] or value
+				if XClient:SetFont(name) then
+					XClient:Notify({ Title = "XClient", Content = "Interface font set to " .. tostring(name) .. "." })
+				end
+			end,
 		})
 	end
 
@@ -2824,45 +4957,185 @@ function XClient:CreateWindow(settings)
 		title.Position = UDim2.fromOffset(42, 0)
 		title.Size = UDim2.new(1, -160, 1, 0)
 	end
+	--  the topbar title must never run underneath the three window buttons
+	fitLabel(title, WINDOW_WIDTH - (iconImage and 168 or 118), { MinSize = 11 })
 
-	if settings.LoadingTitle or settings.LoadingSubtitle then
+	--  Loading animation -------------------------------------------------
+	--  CS style boot sequence over the interface: HUD brackets, the title, a
+	--  bar with a moving shimmer and a percentage counter, then a fade out.
+	--      Loading = true | false | <seconds>     (defaults to on as soon as a
+	--                                             title or subtitle is given)
+	--      LoadingTitle, LoadingSubtitle, LoadingSteps = { "Loading", ... },
+	--      LoadingDuration = 1.5
+	local loadData = type(settings.Loading) == "table" and settings.Loading or nil
+	local loadingRequested = settings.Loading ~= false
+		and (settings.Loading == true or type(settings.Loading) == "number"
+			or loadData ~= nil or settings.LoadingTitle ~= nil or settings.LoadingSubtitle ~= nil)
+
+	if loadingRequested then
+		local duration = tonumber(settings.LoadingDuration)
+			or (type(settings.Loading) == "number" and settings.Loading)
+			or (loadData and tonumber(loadData.Duration))
+			or 1.5
+		if duration < 0.2 then duration = 0.2 end
+		local titleText = settings.LoadingTitle or (loadData and loadData.Title) or tostring(settings.Name or "XClient")
+		local subtitleText = settings.LoadingSubtitle or (loadData and loadData.Subtitle) or "Interface Suite"
+		local stepList = settings.LoadingSteps or (loadData and loadData.Steps) or {
+			"Loading modules",
+			"Building interface",
+			"Applying configuration",
+			"Ready",
+		}
+		if type(stepList) ~= "table" or #stepList == 0 then stepList = { subtitleText } end
+		local theme = currentTheme
+
 		local splash = newFrame({
-			Name = "Splash",
-			BackgroundColor3 = currentTheme.Background,
-			BackgroundTransparency = 0.05,
+			Name = "Loading",
+			BackgroundColor3 = theme.Background,
+			BackgroundTransparency = 1,
 			Size = UDim2.fromScale(1, 1),
 			Parent = root,
 		})
 		splash.ZIndex = 60
 		addCorner(splash, UDim.new(0, 10))
+
+		--  HUD corner brackets (procedural, no assets)
+		for _, spec in ipairs({ { 0, 0, 1, 1 }, { 0, 0, -1, 1 }, { 0, 1, 1, -1 }, { 0, 1, -1, -1 } }) do
+			local anchorX = spec[3] > 0 and 0 or 1
+			local anchorY = spec[4] > 0 and 0 or 1
+			local horizontal = newFrame({
+				Name = "Bracket",
+				BackgroundColor3 = theme.Accent,
+				Size = UDim2.fromOffset(16, 2),
+				Position = UDim2.new(spec[1], spec[3] * 12, spec[2], spec[4] * 12),
+				AnchorPoint = Vector2.new(anchorX, anchorY),
+				Parent = splash,
+			})
+			horizontal.ZIndex = 61
+			local vertical = newFrame({
+				Name = "Bracket",
+				BackgroundColor3 = theme.Accent,
+				Size = UDim2.fromOffset(2, 16),
+				Position = UDim2.new(spec[1], spec[3] * 12, spec[2], spec[4] * 12),
+				AnchorPoint = Vector2.new(anchorX, anchorY),
+				Parent = splash,
+			})
+			vertical.ZIndex = 61
+		end
 		local splashTitle = newText({
 			Name = "Title",
-			Text = tostring(settings.LoadingTitle or "XClient"),
+			Text = tostring(titleText),
 			Font = THEME_FONT_BOLD,
-			TextSize = 18,
-			TextColor3 = currentTheme.Text,
+			TextSize = 20,
+			TextColor3 = theme.Text,
 			TextXAlignment = Enum.TextXAlignment.Center,
-			Size = UDim2.new(1, 0, 0, 22),
-			Position = UDim2.new(0, 0, 0.5, -16),
+			Size = UDim2.new(1, -60, 0, 24),
+			Position = UDim2.new(0, 30, 0.5, -30),
 			Parent = splash,
 		})
+		splashTitle.ZIndex = 62
 		local splashSubtitle = newText({
 			Name = "Subtitle",
-			Text = tostring(settings.LoadingSubtitle or "Interface Suite"),
+			Text = tostring(stepList[1] or subtitleText),
 			TextSize = 12,
-			TextColor3 = currentTheme.TextMuted,
+			TextColor3 = theme.TextMuted,
 			TextXAlignment = Enum.TextXAlignment.Center,
-			Size = UDim2.new(1, 0, 0, 16),
-			Position = UDim2.new(0, 0, 0.5, 10),
+			Size = UDim2.new(1, -60, 0, 16),
+			Position = UDim2.new(0, 30, 0.5, 4),
 			Parent = splash,
 		})
-		splashTitle.ZIndex = 61
-		splashSubtitle.ZIndex = 61
-		task.delay(1.2, function()
+		splashSubtitle.ZIndex = 62
+
+		local track = newFrame({
+			Name = "BarTrack",
+			BackgroundColor3 = theme.SliderTrack,
+			Size = UDim2.fromOffset(math.floor(WINDOW_WIDTH * 0.5), 4),
+			Position = UDim2.new(0.5, 0, 0.5, 30),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Parent = splash,
+		})
+		track.ZIndex = 61
+		addCorner(track, UDim.new(1, 0))
+
+		local fill = newFrame({
+			Name = "BarFill",
+			BackgroundColor3 = theme.Accent,
+			Size = UDim2.new(0, 0, 1, 0),
+			Parent = track,
+		})
+		fill.ZIndex = 62
+		addCorner(fill, UDim.new(1, 0))
+
+		local shimmer = newFrame({
+			Name = "Shimmer",
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0.5,
+			Size = UDim2.fromOffset(70, 4),
+			Position = UDim2.new(0, -80, 0, 0),
+			Parent = track,
+		})
+		shimmer.ZIndex = 63
+		addCorner(shimmer, UDim.new(1, 0))
+
+		local percent = newText({
+			Name = "Percent",
+			Text = "0%",
+			TextSize = 11,
+			Font = THEME_FONT_BOLD,
+			TextColor3 = theme.TextMuted,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Size = UDim2.fromOffset(70, 14),
+			Position = UDim2.new(1, 0, 0, -18),
+			Parent = track,
+		})
+		percent.ZIndex = 62
+
+		fitLabel(splashTitle, WINDOW_WIDTH - 120, { MaxSize = 20, MinSize = 12 })
+		fitLabel(splashSubtitle, WINDOW_WIDTH - 120, { MaxSize = 12, MinSize = 10 })
+		--  fade the overlay in and grow the bar across the whole duration
+		tween(splash, 0.18, { BackgroundTransparency = 0.02 })
+		tween(fill, duration * 0.92, { Size = UDim2.new(1, 0, 1, 0) })
+
+		--  the shimmer sweeps the bar while the interface loads (repeats in the
+		--  engine itself, so no Lua loop is left running)
+		if TweenService then
+			pcall(function()
+				local info = TweenInfo.new(0.9, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false)
+				TweenService:Create(shimmer, info, { Position = UDim2.new(1, 10, 0, 0) }):Play()
+			end)
+		end
+
+		--  percentage + status text step along with the bar (a bounded chain of
+		--  delays, so nothing keeps ticking once the interface is up)
+		local steps = 20
+		local index = 0
+		local function tick()
+			if not (splash and splash.Parent) then return end
+			if index >= steps then return end
+			index = index + 1
+			local ratio = index / steps
+			percent.Text = string.format("%d%%", math.floor(ratio * 100 + 0.5))
+			local stepName = stepList[math.min(#stepList, math.floor(ratio * #stepList) + 1)]
+			if stepName then
+				splashSubtitle.Text = tostring(stepName)
+				fitLabel(splashSubtitle, WINDOW_WIDTH - 120, { MaxSize = 12, MinSize = 10 })
+			end
+			if index < steps then
+				task.delay(duration / steps, tick)
+			end
+		end
+		task.delay(duration / steps, tick)
+
+		--  fade everything out and drop the overlay
+		task.delay(duration, function()
 			if not (splash and splash.Parent) then return end
 			tween(splash, 0.3, { BackgroundTransparency = 1 })
 			tween(splashTitle, 0.3, { TextTransparency = 1 })
 			tween(splashSubtitle, 0.3, { TextTransparency = 1 })
+			tween(percent, 0.3, { TextTransparency = 1 })
+			tween(track, 0.3, { BackgroundTransparency = 1 })
+			tween(fill, 0.3, { BackgroundTransparency = 1 })
+			tween(shimmer, 0.3, { BackgroundTransparency = 1 })
 			task.delay(0.35, function()
 				if splash and splash.Parent then splash:Destroy() end
 			end)
@@ -2926,6 +5199,8 @@ function XClient:CreateWindow(settings)
 			Parent = button,
 		})
 		label.ZIndex = 13
+		--  rail is narrow: shrink, then wrap, so tab names are never cut off
+		fitLabel(label, RAIL_WIDTH - (iconImage and 42 or 28), { MinSize = 10, Wrap = true })
 
 		local icon
 		if iconImage then
@@ -3012,6 +5287,24 @@ function XClient:CreateWindow(settings)
 			return addRecord({ type = "Label", arg1 = text, arg2 = icon, arg3 = color, arg4 = ignoreTheme })
 		end
 
+		--  Extended widgets (section 9b): viewers and input pads that also
+		--  work inside a module's Settings flyout.
+		function tab:CreatePlayerWidget(settings) return addRecord({ type = "PlayerWidget", opts = settings or {} }) end
+		function tab:CreateImage(settings) return addRecord({ type = "Image", opts = settings or {} }) end
+		function tab:CreateCrosshair(settings) return addRecord({ type = "Crosshair", opts = settings or {} }) end
+		function tab:CreateGraph(settings) return addRecord({ type = "Graph", opts = settings or {} }) end
+		function tab:CreateProgress(settings) return addRecord({ type = "Progress", opts = settings or {} }) end
+		function tab:CreateStepper(settings) return addRecord({ type = "Stepper", opts = settings or {} }) end
+		function tab:CreateSegment(settings) return addRecord({ type = "Segment", opts = settings or {} }) end
+		function tab:CreateWheel(settings) return addRecord({ type = "Wheel", opts = settings or {} }) end
+		function tab:CreateAnalog(settings) return addRecord({ type = "Analog", opts = settings or {} }) end
+		function tab:CreateRadar(settings) return addRecord({ type = "Radar", opts = settings or {} }) end
+		function tab:CreateChips(settings) return addRecord({ type = "Chips", opts = settings or {} }) end
+		--  friendly aliases
+		function tab:CreatePlayerPreview(settings) return tab:CreatePlayerWidget(settings) end
+		function tab:CreateSkinPreview(settings) return tab:CreateImage(settings) end
+		function tab:CreateLoader(settings) return tab:CreateProgress(settings) end
+
 		--  Rebuilds every element of this page (used on theme changes).
 		function tab:Refresh()
 			setupPage()
@@ -3080,9 +5373,23 @@ function XClient:CreateWindow(settings)
 		end
 	end
 
+	--  The library keeps a handle on this window's repaint, so SetFont()
+	--  reaches every interface that is currently on screen.
+	registerRepainter(function() repaint() end)
+
 	--  Window methods (names kept from the previous interface) -----------
 	function Window:Notify(data)
 		XClient:Notify(data)
+	end
+
+	--  Menu open key of this window (see the "Menu open key" row in settings)
+	function Window:SetOpenKey(key)
+		setOpenKey(key)
+		return toggleKey
+	end
+
+	function Window:GetOpenKey()
+		return toggleKey
 	end
 
 	function Window:CreateSection(tab, sectionName)
@@ -3162,6 +5469,53 @@ function XClient:ListConfigurations()
 	return listConfigurations()
 end
 
+--  Font ------------------------------------------------------------------
+--  XClient:SetFont("CS") / ("Classic") / ("Mono") or a full profile table
+--      { Primary = Enum.Font.Oswald, Strong = Enum.Font.Oswald,
+--        Mono = Enum.Font.RobotoMono, Offset = 1 }
+--  Every open interface is rebuilt with the new face straight away.
+function XClient:SetFont(profile)
+	profile = profile or "CS"
+	local name
+	if type(profile) == "table" then
+		name = profile.Name or "Custom"
+		FONT_PROFILES[name] = profile
+	elseif type(profile) == "string" then
+		name = profile
+	end
+	local resolved = name and FONT_PROFILES[name]
+	if not resolved then return false end
+	FONT_PROFILE = name
+	THEME_FONT = resolved.Primary or THEME_FONT
+	THEME_FONT_BOLD = resolved.Strong or resolved.Primary or THEME_FONT_BOLD
+	THEME_FONT_MONO = resolved.Mono or THEME_FONT_MONO
+	FONT_SIZE_OFFSET = tonumber(resolved.Offset) or 0
+	THEME_FACE = resolved.Face
+	XClient.Font = name
+	for _, repaint in ipairs(repainters) do callSafe(repaint) end
+	return true
+end
+
+function XClient:GetFont()
+	return XClient.Font
+end
+
+--  Menu open key ---------------------------------------------------------
+--  Sets the default bind for every window, including the ones already open.
+function XClient:SetOpenKey(key)
+	local normalized
+	if typeof(key) == "EnumItem" then normalized = string.upper(key.Name) end
+	if type(key) == "string" then normalized = string.upper(key) end
+	if normalized == nil then return false end
+	XClient.OpenKey = normalized
+	for _, setter in ipairs(openKeySetters) do callSafe(setter, normalized) end
+	return true
+end
+
+function XClient:GetOpenKey()
+	return XClient.OpenKey
+end
+
 function XClient:SetVisibility(state)
 	if activeContext and activeContext.setVisible then
 		activeContext.setVisible(state)
@@ -3189,6 +5543,8 @@ function XClient:Destroy()
 	notifications = nil
 	XClient.Flags = {}
 	XClient.Windows = {}
+	--  drop the repaint / open key handles of the windows that just died
+	clearRegistries()
 end
 
 --  Expose the library globally, the way the previous interface did, so any
