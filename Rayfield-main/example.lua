@@ -24,6 +24,10 @@ local XClient = loadstring(game:HttpGet("https://raw.githubusercontent.com/your-
 --  Running from the file system instead? Use:
 --  local XClient = loadstring(readfile("xclient.lua"))()
 
+--  Prefer not to re-download the whole library on every injection? loader.lua
+--  caches it on disk and only checks a short version marker afterwards:
+--  local XClient = loadstring(game:HttpGet(".../loader.lua"))()
+
 --  Optional: enable the named (Lucide) icons that longer scripts pass as
 --  strings, e.g. Window:CreateTab("Combat", "swords"). Grab icons.lua from
 --  this repository and hand its "48px" table over once.

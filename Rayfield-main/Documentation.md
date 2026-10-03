@@ -15,6 +15,14 @@ local XClient = loadstring(game:HttpGet("URL_TO/xclient.lua"))()
 
 The library is also placed in the executor environment as `getgenv().XClient`.
 
+On repeat injections the whole file is fetched again every time. `loader.lua`
+ships a lighter, disk-cached entry point instead — it keeps a local copy of the
+library and only asks the repository for a tiny version marker (see section 17):
+
+```lua
+local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
+```
+
 ---
 
 ## 2. Creating a window
@@ -781,5 +789,81 @@ Friendly aliases: `Tab:CreatePlayerPreview` (PlayerWidget),
 The widgets restore themselves through the same `:Set(value)` entry point the
 classic elements use, so `LoadConfiguration()` re-applies them without any extra
 code.
+
+---
+
+## 17. Auto-loader (disk cache)
+
+`loader.lua` is an optional, lightweight replacement for the one-shot HTTP fetch
+in section 1. It keeps a local copy of the library on disk and, on later runs,
+only asks the repository for a tiny version marker instead of re-downloading the
+whole file.
+
+```lua
+local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
+```
+
+The loader returns the same library table `xclient.lua` returns, so the rest of a
+script is unchanged.
+
+Behaviour:
+
+| Situation | What happens |
+| --- | --- |
+| First run (no cache) | downloads `xclient.lua`, runs it and writes it to the cache with `writefile` |
+| Later run, same version | one short version request, then the saved file is loaded from disk with `readfile` |
+| New version published | re-downloads `xclient.lua`, refreshes the cache and runs the fresh copy |
+| Version request fails / offline | keeps using the cached copy |
+
+Files (inside the executor's workspace folder):
+
+| Path | Purpose |
+| --- | --- |
+| `XClient/xclient.lua` | the cached library |
+| `XClient/.version` | the last seen remote version / hash |
+
+### Configuration
+
+Edit `Loader.Config` at the top of `loader.lua`:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `User`, `Repo`, `Branch`, `File` | placeholder | where the library lives on GitHub |
+| `VersionURL` | `nil` | optional tiny marker file (e.g. `version.txt`) used instead of the GitHub API |
+| `Folder` | `"XClient"` | cache folder |
+| `CacheFile` | `"xclient.lua"` | cached library name |
+| `MarkerFile` | `".version"` | cached version marker name |
+| `Cache` | `true` | `false` always re-downloads (handy while editing) |
+| `Offline` | `true` never touches the network | use the cached copy only |
+
+**Version source.** With `VersionURL = nil` the loader asks the GitHub API for the
+hash of the latest commit that touched `File`
+(`/repos/<User>/<Repo>/commits?path=<File>&per_page=1`) — it changes on its own
+every time the library is pushed, so there is nothing to keep in sync by hand.
+Point `VersionURL` at a small published marker (the loader fetches it instead)
+for a shorter request and no API rate limit.
+
+**Overriding without editing the file.** Set `getgenv().XClientLoaderOptions`
+before loading it:
+
+```lua
+getgenv().XClientLoaderOptions = { User = "me", Repo = "MyHub", Branch = "main" }
+local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
+```
+
+### Utilities
+
+The loader is also exposed as `getgenv().XClientLoader`:
+
+```lua
+local Loader = getgenv().XClientLoader
+Loader:GetVersion()        -- the version stored in the cache
+Loader:CheckForUpdate()    -- remoteVersion, hasUpdate
+Loader:Update()            -- force a re-download into the cache (does not run it)
+Loader:ClearCache()        -- remove the cached library and its marker
+Loader:Load()              -- run the whole load sequence again
+```
+
+---
 
 

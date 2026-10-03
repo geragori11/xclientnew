@@ -1643,6 +1643,61 @@ if exampleChunk then
 	end
 end
 
+print("== 25. loader.lua (disk cache) ==")
+--  Serve a fake repository: the GitHub API reports the latest commit hash and
+--  the raw endpoint returns the library.  The request counters let us prove the
+--  short version probe replaces the full download on the second run.
+local apiCalls, rawCalls = 0, 0
+local remoteSha = "sha-aaaa"
+game.HttpGet = function(_, url)
+	if string.find(url, "api.github.com", 1, true) then
+		apiCalls = apiCalls + 1
+		return "[ { \"sha\": \"" .. remoteSha .. "\" } ]"
+	end
+	rawCalls = rawCalls + 1
+	return librarySource
+end
+game.HttpGetAsync = game.HttpGet
+
+--  start from a clean cache
+if isfile("XClient/xclient.lua") then delfile("XClient/xclient.lua") end
+if isfile("XClient/.version") then delfile("XClient/.version") end
+
+--  first run: no cache -> the library is downloaded and written to disk
+local FirstLoad = dofile("loader.lua")
+check("first run returns the library", realType(FirstLoad) == "table" and FirstLoad.Flags ~= nil)
+check("first run wrote the cache file", isfile("XClient/xclient.lua"))
+check("first run remembered the version", isfile("XClient/.version") and readfile("XClient/.version") == "sha-aaaa")
+check("first run downloaded the library", rawCalls == 1)
+check("first run probed the version", apiCalls == 1)
+
+--  second run: same version -> only the short probe, the file comes from disk
+apiCalls, rawCalls = 0, 0
+local SecondLoad = dofile("loader.lua")
+check("second run returns the library", realType(SecondLoad) == "table")
+check("second run skipped the download", rawCalls == 0)
+check("second run did the short version request", apiCalls == 1)
+check("loader is exposed in the environment", realType(getgenv().XClientLoader) == "table")
+
+--  a new commit -> the cache is refreshed
+remoteSha = "sha-bbbb"
+apiCalls, rawCalls = 0, 0
+local ThirdLoad = dofile("loader.lua")
+check("new version detected and downloaded", rawCalls == 1 and apiCalls >= 1)
+check("cache refreshed on disk", readfile("XClient/.version") == "sha-bbbb")
+check("new version still loads", realType(ThirdLoad) == "table")
+
+--  the repository is unreachable -> the cached copy keeps the script working
+game.HttpGet = function() error("offline") end
+local OfflineLoad = dofile("loader.lua")
+check("offline falls back to the cache", realType(OfflineLoad) == "table")
+
+--  utilities: version read + clear
+check("GetVersion reads the marker", getgenv().XClientLoader:GetVersion() == "sha-bbbb")
+getgenv().XClientLoader:ClearCache()
+check("ClearCache removed the library", isfile("XClient/xclient.lua") == false)
+check("ClearCache removed the marker", isfile("XClient/.version") == false)
+
 print("")
 print(string.format("%d checks, %d failures", total, failures))
 if failures > 0 then

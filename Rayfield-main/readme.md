@@ -87,11 +87,33 @@ XClient:Notify({ Title = "Loaded", Content = "Have fun." })
 See `example.lua` for a script that builds every element, and
 `Documentation.md` for the complete reference.
 
+### Cached loader (optional)
+
+`loader.lua` is a drop-in replacement for the one-shot HTTP fetch above. Instead
+of pulling the whole library on every injection it keeps a local copy on disk and
+only asks the repository for a tiny version marker on later runs:
+
+```lua
+local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
+```
+
+* **first run** — downloads `xclient.lua`, writes it to `XClient/xclient.lua`
+  with `writefile` and remembers the remote version;
+* **later runs** — fetches only the version / hash with a short request and, when
+  it has not changed, loads the saved file straight from disk with `readfile`;
+* **a new version** — re-downloads the library and refreshes the cache;
+* **offline** — keeps using the cached copy.
+
+Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
+`Documentation.md` section 17 covers the configuration and the helper methods
+(`GetVersion`, `CheckForUpdate`, `Update`, `ClearCache`).
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `xclient.lua` | the whole library |
+| `loader.lua` | optional disk-cached auto-loader for `xclient.lua` |
 | `example.lua` | example script / compatibility demo |
 | `Documentation.md` | API reference |
 | `icons.lua` | optional Lucide icon sheets used by `XClient.Icons` |
