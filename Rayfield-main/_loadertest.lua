@@ -15,7 +15,11 @@
 --    * the file on disk is recognised by its own build tag, so a legacy commit
 --      hash in .version can no longer pin the cache;
 --    * "version unknown" means verify, never "reuse the stale file";
---    * the fast path, Offline, VerifyCache = false and real offline behaviour.
+--    * the fast path, Offline, VerifyCache = false and real offline behaviour;
+--    * a published file that does not compile is never cached and never
+--      replaces a working copy on disk (the broken-push case), and such a copy
+--      that still matches the published tag re-downloads itself instead of
+--      failing on every injection.
 --=========================================================================
 
 local LOADER = (arg and arg[1]) or "loader.lua"
@@ -101,7 +105,13 @@ local function run(state)
 
             context.rawHits = context.rawHits + 1
             if state.rawBlocked then return "" end
-            return REMOTE
+            --  rawBodies gives every download attempt its own body (the last
+            --  one repeats): that is how "the first URL is broken, the next one
+            --  is fine" is simulated. remoteBody replaces the good one.
+            if state.rawBodies then
+                return state.rawBodies[math.min(context.rawHits, #state.rawBodies)]
+            end
+            return state.remoteBody or REMOTE
         end,
     }
 
@@ -140,7 +150,7 @@ do
     check("never asks the rate limited GitHub API", r.apiHits == 0, r.apiHits .. " API request(s)")
     check("records the new build tag", r.marker == "1.0.4", tostring(r.marker))
     check("refreshes the cached file", r.cache == REMOTE)
-    check("loaded the 1.0.5 loader itself", r.loader == "1.0.5", tostring(r.loader))
+    check("loaded the 1.0.6 loader itself", r.loader == "1.0.6", tostring(r.loader))
 end
 
 --=========================================================================
@@ -349,6 +359,75 @@ do
     check("ignores the stale file on disk", r.rawHits == 1, r.rawHits .. " download(s)")
     check("writes nothing into the cache", r.cache == CACHED)
     check("leaves the marker alone", r.marker == "1.0.3", tostring(r.marker))
+end
+
+--=========================================================================
+--  16. A published file that does not compile (the broken-push case)
+--=========================================================================
+do
+    print("\nthe published file does not compile, a working copy is on disk")
+    --  Seen in the wild: the tag was pushed as a bare number ('XClient.Build =
+    --  1.0.9'), so the parser reads 1.0 and then chokes on '.9'. The body is
+    --  long enough and the request succeeds - only the parser knows it is junk.
+    local brokenPublish = PAD
+        .. "XClient.Build = 1.0.9\n"
+        .. "return { Version = 'BROKEN' }\n"
+
+    local r = run({
+        cachedSource = CACHED, cachedVersion = "1.0.3",
+        markerVersion = "1.0.9", apiBlocked = true,
+        remoteBody = brokenPublish,
+    })
+
+    check("still runs the menu", r.ok and r.version == "CACHED", r.error)
+    check("keeps the working copy on disk", r.cache == CACHED)
+    check("warns that the published file does not compile",
+        warned(r, "does not compile"), r.warnedMsg)
+end
+
+do
+    print("\nthe published file does not compile and nothing is cached")
+    local r = run({
+        markerVersion = "1.0.9", apiBlocked = true,
+        remoteBody = PAD .. "XClient.Build = 1.0.9\n",
+    })
+
+    check("reports the parser error instead of 'unreachable'",
+        (not r.ok)
+        and r.error:find("compile error", 1, true) ~= nil
+        and r.error:find("could not obtain", 1, true) == nil, r.error)
+end
+
+do
+    print("\nthe first URL serves a broken body, a later one works")
+    local r = run({
+        cachedSource = CACHED, cachedVersion = "1.0.3",
+        markerVersion = "1.0.4", apiBlocked = true,
+        rawBodies = { PAD .. "XClient.Build = 1.0.4\n", REMOTE },
+    })
+
+    check("skips the broken body and runs the working one",
+        r.version == "REMOTE", "ran " .. tostring(r.version))
+    check("caches the body that compiles", r.cache == REMOTE)
+    check("tried more than one URL", r.rawHits >= 2, r.rawHits .. " download(s)")
+end
+
+do
+    print("\nthe cached copy is broken but its tag matches the published one")
+    --  The poisoned state: the loader had already saved the bad body, so the
+    --  fast path (published tag == tag on disk) would run it forever. Failing
+    --  to compile has to trigger the re-download instead.
+    local poisoned = PAD
+        .. 'XClient.Build = "1.0.4"\n'
+        .. "local = oops\n"
+
+    local r = run({
+        cachedSource = poisoned, cachedVersion = "1.0.4",
+        markerVersion = "1.0.4", apiBlocked = true,
+    })
+
+    check("re-downloads and heals", r.ok and r.version == "REMOTE", r.error)
+    check("replaces the broken cache", r.cache == REMOTE)
 end
 
 print(string.format("\n%d checks, %d failures", checks, failures))

@@ -904,6 +904,7 @@ Behaviour:
 | First run (no cache) | downloads `xclient.lua`, runs it and writes it to the cache with `writefile` |
 | Later run, same version | one tiny request for `version.txt`, then the saved file is loaded from disk with `readfile` |
 | New version published | re-downloads `xclient.lua`, refreshes the cache and runs the fresh copy |
+| Published file does not compile | skipped like an error page: nothing is cached or overwritten and the copy on disk keeps working |
 | Version request fails, library reachable | the cached copy is verified against the repository first, so a published fix is never missed |
 | Repository unreachable (real offline) | keeps using the cached copy |
 
@@ -931,8 +932,8 @@ Edit `Loader.Config` at the top of `loader.lua`:
 | `VerifyCache` | `true` | `false` trusts the cached copy when the build tag cannot be read (old behaviour) |
 
 **Manual version, no API.** `version.txt` next to the library holds one short
-token, e.g. `1.0.5`. The very same token is declared inside the library as
-`XClient.Build = "1.0.5"`, so there are two things the loader can compare:
+token, e.g. `1.6.0`. The very same token is declared inside the library as
+`XClient.Build = "1.6.0"`, so there are two things the loader can compare:
 
 * the tag published on GitHub (`version.txt`, a few bytes from the same host
   that serves `xclient.lua`), and
@@ -970,6 +971,18 @@ copy, and only falls back to the stored copy when the repository is genuinely
 unreachable. Set `VerifyCache = false` to trust the cache without checking, or
 `Offline = true` to skip the network entirely.
 
+**A published file that does not compile cannot take the menu down.** Every
+downloaded body has to compile before the loader does anything with it: a body
+`loadstring` rejects is treated exactly like an error page, so it is never
+written into the cache and never replaces the copy that works. The loader tries
+the next URL instead and, when none of them compiles, it keeps running the file
+on disk and warns `the published file does not compile; using the copy on
+disk`. The only case that still fails is *nothing cached **and** the published
+file broken* — and then the error quotes the real parser message instead of
+claiming the repository was unreachable. That is what turns a bad push (a bare
+`XClient.Build = 1.6.0` without the quotes, say) into a non-event for everybody
+who already has a working copy.
+
 `Loader.Version` (`getgenv().XClientLoader.Version`) tells you which loader is
 running — useful to confirm that a newly pushed `loader.lua` actually reached
 the executor. The cache decisions above are covered offline by
@@ -1003,7 +1016,7 @@ Loader:Load()              -- run the whole load sequence again
 getgenv().XClientLoader:ClearCache()                 -- true when something was removed
 local url = "URL_TO/loader.lua?t=" .. os.time()      -- also cache-bust the loader itself
 loadstring(game:HttpGet(url))()                      -- auto-run downloads the library again
-print(getgenv().XClient.Build)                       -- e.g. 1.0.5
+print(getgenv().XClient.Build)                       -- e.g. 1.6.0
 ```
 
 The same files can be deleted by hand, without the loader (paths are relative to

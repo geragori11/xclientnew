@@ -29,7 +29,7 @@
 =========================================================================]]
 
 local Loader = {}
-Loader.Version = "1.0.5"
+Loader.Version = "1.0.6"
 
 --=========================================================================
 --  1. CONFIGURATION
@@ -183,15 +183,40 @@ local function requestHTTP(url, minLength)
     return nil
 end
 
+--  "Long enough" is not the same as "usable": a half finished push, an editor
+--  that saved a stray character, or a proxy notice all pass the length test in
+--  requestHTTP and still make loadstring fail. Asking the parser right away
+--  means such a body is treated exactly like an error page - it is never written
+--  into the cache and never replaces a copy that still works.
+local function tryCompile(source, label)
+    if type(source) ~= "string" or source == "" then
+       return nil, "empty source"
+    end
+    local chunk, compileError = loadstring(source, "@" .. (label or "xclient.lua"))
+    if not chunk then
+       return nil, tostring(compileError)
+    end
+    return chunk
+end
+
+--  Returns the first downloaded body that actually compiles, so a broken
+--  revision (or a truncated response) can neither be cached nor stop the library
+--  from loading while a working copy is still on disk. The first body that was
+--  long enough but did not compile comes back as the second value, so the caller
+--  can report the real parser error when there is nothing to fall back on -
+--  "does not compile" is what happened, "unreachable" would be a lie.
 local function downloadFile(cfg)
     local urls = candidateURLs(cfg)
+    local broken, brokenError = nil, nil
     for _, url in ipairs(urls) do
        local body = requestHTTP(url)
        if body and #body > 50 then
-          return body
+          local chunk, compileError = tryCompile(body, cfg.File)
+          if chunk then return body end
+          if not broken then broken, brokenError = body, compileError end
        end
     end
-    return nil
+    return nil, broken, brokenError
 end
 
 local function getHttpService()
@@ -358,8 +383,13 @@ end
 
 function Loader:Fetch(options)
     local cfg = withOptions(options)
-    local source = downloadFile(cfg)
-    if type(source) ~= "string" then return nil, "the repository is unreachable" end
+    local source, brokenSource, brokenError = downloadFile(cfg)
+    if type(source) ~= "string" then
+       if brokenSource then
+          return nil, "the published file does not compile (" .. tostring(brokenError) .. ")"
+       end
+       return nil, "the repository is unreachable"
+    end
     if cfg.Cache then
        writeCache(cfg, source)
        local remoteVersion, remoteSource = resolveRemoteVersion(cfg)
@@ -410,7 +440,10 @@ function Loader:Load(options)
        if cachedSource and remoteVersion == nil and not cfg.Offline then
           notify("[XClient loader] the published version could not be read; verifying the cached copy against the repository.")
        end
-       source = downloadFile(cfg)
+       --  downloadFile only hands back a body that compiles; the first one that
+       --  was long enough but broken comes back as the second value.
+       local brokenSource, brokenError = nil, nil
+       source, brokenSource, brokenError = downloadFile(cfg)
        if source then
           if cfg.Cache then
              local freshBuild = versionFromSource(source)
@@ -426,8 +459,19 @@ function Loader:Load(options)
                 or tostring(os and os.time and os.time() or "1"))
           end
        elseif cachedSource then
+          --  Nothing usable is available from the repository (or the published
+          --  file does not compile): the copy on disk is still the best thing we
+          --  have, and it is left untouched - a broken push can no longer wipe
+          --  out a working cache and then refuse to load.
           source = cachedSource
           usedCache = true
+          if brokenError then
+             notify("[XClient loader] the published file does not compile; using the copy on disk.")
+          end
+       elseif brokenSource then
+          --  No copy on disk at all: run what we got so the error below reports
+          --  the real parser message instead of a misleading "unreachable".
+          source = brokenSource
        end
     end
 

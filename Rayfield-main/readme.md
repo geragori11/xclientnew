@@ -113,6 +113,9 @@ local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
   file on disk, loads that file straight from `readfile`. No GitHub API, so
   there is no rate limit to run into;
 * **a new version** — re-downloads the library and refreshes the cache;
+* **a broken push** — a download that does not compile is never cached and never
+  replaces the working copy on disk (the other URLs are tried first and the
+  cached file keeps the menu running);
 * **version request blocked** — verifies the cached copy against the repository
   and refreshes it when needed, so a published fix is never missed;
 * **offline** — keeps using the cached copy;

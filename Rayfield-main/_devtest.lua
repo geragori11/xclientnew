@@ -2181,8 +2181,21 @@ print("== 25. loader.lua (disk cache) ==")
 --  download on the second run.
 local apiCalls, rawCalls, markerCalls = 0, 0, 0
 local remoteSha = "sha-aaaa"
-local publishedTag = "1.0.5"
+--  The tag published in version.txt is read out of the library itself, so
+--  bumping XClient.Build can never leave these fixtures behind (they used to
+--  hardcode the current version).
+local libraryTag = librarySource:match('XClient%.Build%s*=%s*"([^"]+)"')
+local publishedTag = libraryTag
 local servedSource = librarySource
+
+--  A copy of the library declaring a different build tag. The swap is checked
+--  (nil means "nothing matched"), so a change to the version line can never make
+--  this fixture quietly serve the untagged copy.
+local function retag(source, tag)
+	local retagged = source:gsub('XClient%.Build%s*=%s*"[^"]*"', 'XClient.Build = "' .. tag .. '"', 1)
+	if retagged == source then return nil end
+	return retagged
+end
 game.HttpGet = function(_, url)
 	if string.find(url, "version.txt", 1, true) then
 		markerCalls = markerCalls + 1
@@ -2211,7 +2224,7 @@ if isfile("XClient/.version") then delfile("XClient/.version") end
 local FirstLoad = dofile("loader.lua")
 check("first run returns the library", realType(FirstLoad) == "table" and FirstLoad.Flags ~= nil)
 check("first run wrote the cache file", isfile("XClient/xclient.lua"))
-check("first run remembered the build tag", isfile("XClient/.version") and readfile("XClient/.version") == "1.0.5")
+check("first run remembered the build tag", isfile("XClient/.version") and readfile("XClient/.version") == libraryTag)
 check("first run downloaded the library", rawCalls == 1)
 check("first run probed version.txt", markerCalls >= 1)
 check("first run did not need the API", apiCalls == 0)
@@ -2226,18 +2239,25 @@ check("second run did not need the API", apiCalls == 0)
 check("loader is exposed in the environment", realType(getgenv().XClientLoader) == "table")
 
 --  a newly published tag -> the cache is refreshed
-publishedTag = "1.0.6"
-servedSource = string.gsub(librarySource, 'XClient%.Build = "1%.0%.5"', 'XClient.Build = "1.0.6"', 1)
+local nextTag = libraryTag:gsub("(%d+)$", function(n) return tostring(tonumber(n) + 1) end)
+publishedTag = nextTag
+servedSource = retag(librarySource, nextTag)
+check("the fixture could be retagged", servedSource ~= nil)
+if not servedSource then servedSource = librarySource end
+print(string.format("[devtest] tags: cached=%s published=%s served=%s",
+	libraryTag, nextTag, servedSource:match('XClient%.Build%s*=%s*"([^"]+)"')))
 apiCalls, rawCalls, markerCalls = 0, 0, 0
 local ThirdLoad = dofile("loader.lua")
-check("new tag detected and downloaded", rawCalls == 1 and markerCalls >= 1)
-check("cache refreshed on disk", readfile("XClient/.version") == "1.0.6")
+check("new tag detected and downloaded (" .. rawCalls .. " download(s), " .. markerCalls .. " marker request(s))",
+	rawCalls == 1 and markerCalls >= 1)
+check("cache refreshed on disk (marker=" .. tostring(isfile("XClient/.version") and readfile("XClient/.version"))
+	.. " expected=" .. tostring(nextTag) .. ")", readfile("XClient/.version") == nextTag)
 check("new version still loads", realType(ThirdLoad) == "table")
 
 --  and the run after the update is back to the cached copy
 apiCalls, rawCalls, markerCalls = 0, 0, 0
 local FourthLoad = dofile("loader.lua")
-check("the updated cache is reused", realType(FourthLoad) == "table" and rawCalls == 0)
+check("the updated cache is reused (" .. rawCalls .. " download(s))", realType(FourthLoad) == "table" and rawCalls == 0)
 
 --  the repository is unreachable -> the cached copy keeps the script working
 game.HttpGet = function() error("offline") end
@@ -2245,7 +2265,9 @@ local OfflineLoad = dofile("loader.lua")
 check("offline falls back to the cache", realType(OfflineLoad) == "table")
 
 --  utilities: version read + clear
-check("GetVersion reads the cached build tag", getgenv().XClientLoader:GetVersion() == "1.0.6")
+check("GetVersion reads the cached build tag ("
+	.. tostring(getgenv().XClientLoader:GetVersion()) .. " expected " .. tostring(nextTag) .. ")",
+	getgenv().XClientLoader:GetVersion() == nextTag)
 getgenv().XClientLoader:ClearCache()
 check("ClearCache removed the library", isfile("XClient/xclient.lua") == false)
 check("ClearCache removed the marker", isfile("XClient/.version") == false)
