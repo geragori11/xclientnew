@@ -145,20 +145,63 @@ TweenInfo = {}
 function TweenInfo.new(...) return { Args = { ... } } end
 
 -- ---------------------------------------------------------------- signals
+--  Leak instrumentation.  Every connection the shim hands out and every
+--  instance it creates is counted, so the driver can prove that rebuilding a
+--  part of the interface (opening / closing the per module gear flyout) does
+--  not pile either of them up - that is the "the menu starts lagging after a
+--  while" report.  The counters are plain numbers, so they cost nothing.
+local liveConnections = 0
+local liveInstances = 0
+local function connectionTotal() return liveConnections end
+local function instanceTotal() return liveInstances end
+
+--  Every instance the shim ever built, tagged instead of removed when it is
+--  destroyed: walking the list lets the soak section print what is still alive
+--  by class and name, which is how a leak is located.
+local createdInstances = {}
+local function liveInstanceCounts()
+	local counts = {}
+	for _, entry in ipairs(createdInstances) do
+		if not rawget(entry, "destroyed") then
+			local key = entry.className .. ":" .. tostring(entry.props.Name)
+			counts[key] = (counts[key] or 0) + 1
+		end
+	end
+	return counts
+end
+local function countsDiff(before, after)
+	local keys = {}
+	for key in pairs(before) do keys[key] = true end
+	for key in pairs(after) do keys[key] = true end
+	local out = {}
+	for key in pairs(keys) do
+		local delta = (after[key] or 0) - (before[key] or 0)
+		if delta ~= 0 then out[#out + 1] = string.format("%s%+d", key, delta) end
+	end
+	table.sort(out)
+	return table.concat(out, ", ")
+end
+
 local Signal = {}
 Signal.__index = Signal
 function Signal.new()
-	return setmetatable({ handlers = {} }, Signal)
+	return setmetatable({ handlers = {}, connections = {} }, Signal)
 end
 function Signal:Connect(fn)
 	local connection = { Connected = true }
+	liveConnections = liveConnections + 1
 	connection.Disconnect = function()
+		if connection.Connected then liveConnections = liveConnections - 1 end
 		connection.Connected = false
+		for index, entry in ipairs(self.connections) do
+			if entry == connection then table.remove(self.connections, index) break end
+		end
 		for index, handler in ipairs(self.handlers) do
 			if handler == fn then table.remove(self.handlers, index) break end
 		end
 	end
 	self.handlers[#self.handlers + 1] = fn
+	self.connections[#self.connections + 1] = connection
 	return connection
 end
 function Signal:Once(fn)
@@ -184,6 +227,8 @@ local function newInstance(className)
 		changedSignals = {},
 		className = className,
 	}, instanceMeta)
+	liveInstances = liveInstances + 1
+	createdInstances[#createdInstances + 1] = self
 	self.props.Name = className
 	self.props.Visible = true
 	self.props.Text = ""
@@ -261,8 +306,15 @@ end
 function instanceMethods.IsA(self, className) return self.className == className end
 
 function instanceMethods.ClearAllChildren(self)
-	for _, child in ipairs(rawget(self, "children")) do child:Destroy() end
+	--  The engine detaches the list and then destroys every child; iterating
+	--  the live list while Destroy() removes from it would skip every second
+	--  child and silently leak them.  The shim must not fake a leak the engine
+	--  does not have (the soak section below is looking for exactly that).
+	local children = rawget(self, "children")
+	local snapshot = {}
+	for index, child in ipairs(children) do snapshot[index] = child end
 	rawset(self, "children", {})
+	for _, child in ipairs(snapshot) do child:Destroy() end
 end
 
 --  Focus is tracked the way the engine does it: a TextBox that captures it
@@ -270,13 +322,41 @@ end
 --  UserInputService:GetFocusedTextBox()
 local focusedTextBox = nil
 
+--  The engine drops every connection made to an instance's own events when the
+--  instance is destroyed, so the shim has to sweep both the lazily created
+--  property signals and the GetPropertyChangedSignal ones - otherwise a
+--  destroyed row would keep its handlers alive and fake a connection leak.
+local function releaseInstanceSignals(store)
+	for _, value in pairs(store) do
+		if realType(value) == "table" and rawget(value, "connections") then
+			for index = #value.connections, 1, -1 do
+				local connection = value.connections[index]
+				if connection.Disconnect then connection.Disconnect() end
+			end
+		end
+	end
+end
+
 function instanceMethods.Destroy(self)
+	--  counted once: the interface destroys containers together with their
+	--  children, and a second Destroy on the same instance is a no-op anyway
+	if rawget(self, "destroyed") then return end
+	rawset(self, "destroyed", true)
+	liveInstances = liveInstances - 1
+	releaseInstanceSignals(rawget(self, "props"))
+	releaseInstanceSignals(rawget(self, "changedSignals"))
 	if focusedTextBox == self then focusedTextBox = nil end
 	local parent = self.props.Parent
 	if parent and parent.RemoveChild then parent:RemoveChild(self) end
 	self.props.Parent = nil
-	for _, child in ipairs(rawget(self, "children")) do child:Destroy() end
+	--  destroy every descendant, like the engine: each child removes itself
+	--  from the live list while the loop runs, so iterate over a snapshot or
+	--  every second child would survive and fake a leak
+	local children = rawget(self, "children")
+	local snapshot = {}
+	for index, child in ipairs(children) do snapshot[index] = child end
 	rawset(self, "children", {})
+	for _, child in ipairs(snapshot) do child:Destroy() end
 end
 
 function instanceMethods.GetPropertyChangedSignal(self, property)
@@ -2032,6 +2112,125 @@ local ApiSecondLoad = dofile("loader.lua")
 check("API fallback reuses the cache", realType(ApiSecondLoad) == "table" and rawCalls == 0 and apiCalls >= 1)
 getgenv().XClientLoaderOptions = nil
 
+
+--  Section 26 lives in its own function: Lua 5.1 allows 200 locals per
+--  function, and the chunk above is already close to that.
+local function soakGearFlyout()
+	print("== 26. soak: the gear flyout rebuilt 100 times ==")
+	--  The report this section answers: "with the controls hidden behind the gear
+	--  (Settings = {}) the menu starts lagging after a while, while the same
+	--  controls laid out flat on the tab are fine".  Every open of the panel
+	--  rebuilds its rows from scratch, so every instance, signal connection and
+	--  input handler the builders create has to be released again when the panel
+	--  closes.  A leak would grow linearly with the number of cycles, so the
+	--  counters are sampled after the first cycle and after the hundredth: they
+	--  have to match.
+	local connectionsBeforeSoak = connectionTotal()
+	local instancesBeforeSoak = instanceTotal()
+
+	local soakScreenGuis = {}
+	for _, child in ipairs(coreGui:GetChildren()) do soakScreenGuis[child] = true end
+
+	local SoakWindow = XClient:CreateWindow({ Name = "Soak window", Theme = "Default" })
+	local soakTab = SoakWindow:CreateTab("Soak")
+	local soakBase = soakTab:CreateToggle({
+		Name = "Soak module",
+		Flag = "soakFlag",
+		CurrentValue = true,
+		Settings = {
+			{ Type = "Toggle", Name = "Nested toggle", Flag = "soakToggle", CurrentValue = false },
+			{ Type = "Slider", Name = "Nested slider", Range = { 0, 100 }, CurrentValue = 25, Flag = "soakSlider" },
+			{ Type = "Dropdown", Name = "Nested list", Options = { "One", "Two" }, Flag = "soakList" },
+			{ Type = "Keybind", Name = "Nested key", Flag = "soakKey" },
+			{ Type = "ColorPicker", Name = "Nested colour", Flag = "soakColour" },
+			{ Type = "Label", Text = "nested label line" },
+		},
+		Callback = function() end,
+	})
+	--  the rows behind the gear are built on demand, so their flags only exist
+	--  once the panel has been opened at least once (Documentation.md, section 5)
+	check("nested flags do not exist before the first gear press",
+		XClient.Flags["soakToggle"] == nil and XClient.Flags["soakSlider"] == nil)
+	check("the row carrying the gear is registered right away", XClient.Flags["soakFlag"] ~= nil)
+
+	local soakGui
+	for _, child in ipairs(coreGui:GetChildren()) do
+		if not soakScreenGuis[child] and child.Name == "XClient" then soakGui = child end
+	end
+	local soakRoot = soakGui and soakGui:FindFirstChild("XClientWindow")
+	local soakFlyout = soakRoot and soakRoot:FindFirstChild("SettingsFlyout")
+	check("the soak window built its own interface", soakGui ~= nil and soakRoot ~= nil)
+	check("the soak flyout panel exists", soakFlyout ~= nil)
+	--  let the loading animation of the new window run out and remove itself
+	for _ = 1, 30 do drainDeferred() end
+
+	local function soakCycle()
+		soakBase.Base.gearButton.MouseButton1Click:Fire()
+		drainDeferred()
+		soakBase.Base.gearButton.MouseButton1Click:Fire()
+		drainDeferred()
+	end
+
+	--  A dropdown popped open inside the panel starts a per frame follower
+	--  (RunService) plus its own catcher; closing the panel has to drop both,
+	--  without taking the rows' own handlers with it.
+	soakBase.Base.gearButton.MouseButton1Click:Fire()
+	drainDeferred()
+	local connectionsAfterOpen = connectionTotal()
+	local soakBody = soakFlyout and soakFlyout:FindFirstChild("Body")
+	local listRow = soakBody and soakBody:FindFirstChild("Nested list")
+	local selector = listRow and listRow:FindFirstChild("Selector")
+	check("the nested dropdown row is inside the panel", selector ~= nil)
+	if selector then selector.MouseButton1Click:Fire() end
+	check("the nested dropdown opened", soakRoot:FindFirstChild("Popup") ~= nil)
+	check("its follower connection exists while the list is open",
+		connectionTotal() > connectionsAfterOpen)
+	soakBase.Base.gearButton.MouseButton1Click:Fire()
+	drainDeferred()
+	check("closing the panel removed the nested dropdown", soakRoot:FindFirstChild("Popup") == nil)
+	check("closing the panel released what the popup had opened",
+		connectionTotal() <= connectionsAfterOpen)
+	check("the panel is hidden again", soakFlyout and soakFlyout.Visible == false)
+
+	--  first cycle: remember the costs of a single build ...
+	soakCycle()
+	local afterOneCycle = {
+		connections = connectionTotal(),
+		instances = instanceTotal(),
+		handlers = inputConnections(),
+	}
+	local afterOneCycleCounts = liveInstanceCounts()
+	--  ... then rebuild the panel a hundred times and compare
+	for cycle = 2, 100 do
+		soakCycle()
+		if cycle % 25 == 0 then
+			io.write(string.format("  after %d cycles: connections%+d instances%+d\n",
+				cycle,
+				connectionTotal() - afterOneCycle.connections,
+				instanceTotal() - afterOneCycle.instances))
+		end
+	end
+	check("100 gear rebuilds leaked no connection (grew by "
+		.. (connectionTotal() - afterOneCycle.connections) .. ")",
+		connectionTotal() == afterOneCycle.connections)
+	check("100 gear rebuilds leaked no instance (grew by "
+		.. (instanceTotal() - afterOneCycle.instances) .. ")",
+		instanceTotal() == afterOneCycle.instances)
+	check("100 gear rebuilds leaked no input handler (grew by "
+		.. (inputConnections() - afterOneCycle.handlers) .. ")",
+		inputConnections() == afterOneCycle.handlers)
+	check("the panel rows are still fully built on the last open",
+		soakBody and soakBody:FindFirstChild("Nested slider") ~= nil)
+	print("  leaked after 100 rebuilds: " .. countsDiff(afterOneCycleCounts, liveInstanceCounts()))
+
+	--  and the window itself still tears down without leaving connections behind
+	SoakWindow:Destroy()
+	local destroyedGrowth = connectionTotal() - connectionsBeforeSoak
+	print(string.format("  after destroy: connections%+d instances%+d",
+		destroyedGrowth, instanceTotal() - instancesBeforeSoak))
+	check("destroying the soaked window left no connection behind", destroyedGrowth <= 0)
+end
+soakGearFlyout()
 
 print("")
 print(string.format("%d checks, %d failures", total, failures))

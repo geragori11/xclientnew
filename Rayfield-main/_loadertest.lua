@@ -335,5 +335,21 @@ do
         string.format("version.txt=%s build=%s", tostring(marker):gsub("%s+$", ""), tostring(build)))
 end
 
+--=========================================================================
+--  15. Cache = false - always fresh, nothing written to disk
+--=========================================================================
+do
+    print("\nCache = false with a stale copy on disk")
+    local r = run({
+        cachedSource = CACHED, cachedVersion = "1.0.3", markerVersion = "1.0.4",
+        apiBlocked = true, options = { Cache = false },
+    })
+
+    check("runs the downloaded copy", r.version == "REMOTE", "ran " .. tostring(r.version))
+    check("ignores the stale file on disk", r.rawHits == 1, r.rawHits .. " download(s)")
+    check("writes nothing into the cache", r.cache == CACHED)
+    check("leaves the marker alone", r.marker == "1.0.3", tostring(r.marker))
+end
+
 print(string.format("\n%d checks, %d failures", checks, failures))
 if failures > 0 then os.exit(1) end

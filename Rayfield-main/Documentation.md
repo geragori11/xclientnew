@@ -275,6 +275,23 @@ Tab:CreateToggle({
 Nested settings register their own flags, so they are saved and loaded with the
 rest of the configuration.
 
+The rows behind the gear are **built on demand**: the panel is populated the
+first time the gear is pressed, so a nested flag does not exist in
+`XClient.Flags` — and its `Callback` has not run even once — before that. Drive
+a module from its own `Callback`, or open the panel once (press the gear, or
+`Window:ShowSettings()` for the built-in panel) before reading
+`XClient.Flags["nestedFlag"]`.
+
+Every open rebuilds the rows from scratch. That rebuild is leak-free — the
+instances, the signal connections and the input handlers are all released again
+when the panel closes; `_devtest.lua` section 26 proves it by opening and
+closing the panel a hundred times and comparing the counters (connections
+`+0`, instances `+0`, input handlers `+0`). So if a menu starts lagging after a
+while in a live game, measure before changing the layout: `_leakcheck.lua` prints
+the connection / object counts over time, and the row that keeps growing names
+the culprit (the interface, the game script's own loops, or a loop restarted on
+every respawn).
+
 ---
 
 ## 6. The flag registry
@@ -952,6 +969,34 @@ Loader:CheckForUpdate()    -- remoteVersion, hasUpdate
 Loader:Update()            -- force a re-download into the cache (does not run it)
 Loader:ClearCache()        -- remove the cached library and its marker
 Loader:Load()              -- run the whole load sequence again
+```
+
+**Clearing the cache.** The cached library and its marker are two plain files.
+`Loader:ClearCache()` removes both, and the next load downloads a fresh copy:
+
+```lua
+getgenv().XClientLoader:ClearCache()                 -- true when something was removed
+local url = "URL_TO/loader.lua?t=" .. os.time()      -- also cache-bust the loader itself
+loadstring(game:HttpGet(url))()                      -- auto-run downloads the library again
+print(getgenv().XClient.Build)                       -- e.g. 1.0.5
+```
+
+The same files can be deleted by hand, without the loader (paths are relative to
+the executor's workspace folder, built from `Folder` / `CacheFile` / `MarkerFile`):
+
+```lua
+for _, path in ipairs({ "XClient/xclient.lua", "XClient/.version" }) do
+    if isfile(path) then delfile(path) end
+end
+```
+
+To force a refresh without deleting anything, either update in place with
+`Loader:Update()`, or skip the cache entirely for one run:
+
+```lua
+getgenv().XClientLoaderOptions = { Cache = false }   -- always downloads, writes nothing
+local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
+getgenv().XClientLoaderOptions = nil                 -- back to normal on the next run
 ```
 
 ---

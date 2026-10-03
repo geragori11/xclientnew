@@ -113,7 +113,10 @@ local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
 * **a new version** — re-downloads the library and refreshes the cache;
 * **version request blocked** — verifies the cached copy against the repository
   and refreshes it when needed, so a published fix is never missed;
-* **offline** — keeps using the cached copy.
+* **offline** — keeps using the cached copy;
+* **clearing the cache** — `getgenv().XClientLoader:ClearCache()` deletes
+  `XClient/xclient.lua` and `XClient/.version`, so the next injection downloads a
+  fresh copy (details and the manual fallback: `Documentation.md` §17).
 
 Version bumps are manual: change `XClient.Build` in `xclient.lua`, run
 `lua _mkversion.lua` to refresh `version.txt`, and push both files. The loader
@@ -136,10 +139,15 @@ Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
 | `_devtest.lua` | development harness: runs the library inside a small Roblox shim (`lua _devtest.lua`) |
 | `_loadertest.lua` | development harness: checks `loader.lua`'s cache/update decisions offline (`lua _loadertest.lua`) |
 | `_mkversion.lua` | development tool: writes `version.txt` from `xclient.lua`'s build tag (`lua _mkversion.lua [--check]`) |
+| `_leakcheck.lua` | development tool: run it **in an executor** next to a live script to see what keeps growing (connections, GC objects, windows, flags) |
 | `LICENSE` | licence |
 
 `_devtest.lua` is a developer tool, not part of the library — it needs plain
-Lua 5.1 and does not touch the game.
+Lua 5.1 and does not touch the game. It ends with a soak section that opens and
+closes a module's gear flyout a hundred times and proves the rebuild leaks
+nothing (zero new connections, instances or input handlers, and a clean
+teardown). `_leakcheck.lua` is the same idea for a live game: it only counts,
+it never changes anything.
 
 ## Compatibility notes
 
