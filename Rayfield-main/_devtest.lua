@@ -1366,6 +1366,49 @@ check("LiveUpdate hears the keystrokes", liveFires == 1 and LiveInput.CurrentVal
 LiveInput:Set("programmatic")
 check("Set still fires the callback once", liveFires == 2 and LiveInput.CurrentValue == "programmatic")
 
+--  The report this guards: type the name of a configuration, press Save, and
+--  the jump key (and the open key) stayed dead until the character died and the
+--  engine cleared the focus.  Any press that misses the field hands the
+--  keyboard back, so dying is not what makes the game playable again.
+Window:ShowSettings()
+drainDeferred()
+local storyBody = root:FindFirstChild("SettingsFlyout"):FindFirstChild("Body")
+local storyBox = storyBody:FindFirstChild("Config file name"):FindFirstChild("InputBox")
+storyBox.AbsolutePosition = Vector2.new(30, 260)
+storyBox.AbsoluteSize = Vector2.new(160, 26)
+storyBox:CaptureFocus()
+check("the field owns the keyboard while typing", UserInputService:GetFocusedTextBox() == storyBox)
+UserInputService.InputBegan:Fire({
+	UserInputType = Enum.UserInputType.MouseButton1,
+	Position = Vector2.new(80, 270),
+})
+check("a press inside the field keeps the keyboard", UserInputService:GetFocusedTextBox() == storyBox)
+UserInputService.InputBegan:Fire({
+	UserInputType = Enum.UserInputType.MouseButton1,
+	Position = Vector2.new(430, 330),
+})
+check("a press on a button hands the keyboard back", UserInputService:GetFocusedTextBox() == nil)
+storyBox.Text = "Jump Fix"
+storyBody:FindFirstChild("Save configuration"):FindFirstChild("Interact").MouseButton1Click:Fire()
+check("the button still acts on the name that was on screen", isfile("XClient/Configurations/Jump Fix.rfld"))
+delfile("XClient/Configurations/Jump Fix.rfld")
+--  ...and the keys are the player's again, exactly as they are after a respawn
+XClient:SetOpenKey("K")
+check("the bind is armed", XClient:GetOpenKey() == "K")
+pressKey("K", false)
+check("the open key toggles the interface again", XClient:IsVisible() == false)
+drainDeferred()
+XClient:SetVisibility(true)
+
+--  Dying must not be what fixes it: a respawn releases the field as well, even
+--  though the press above already covers the everyday case.
+storyBox:CaptureFocus()
+check("the field grabbed the keyboard again", UserInputService:GetFocusedTextBox() == storyBox)
+game:GetService("Players").LocalPlayer.CharacterAdded:Fire()
+check("a respawn hands the keyboard back", UserInputService:GetFocusedTextBox() == nil)
+Window:HideSettings()
+drainDeferred()
+
 XClient:SetOpenKey("K")
 XClient:SetVisibility(true)
 check("state restored for the rest of the run", XClient:GetOpenKey() == "K" and XClient:IsVisible() == true)

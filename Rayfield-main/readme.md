@@ -34,6 +34,11 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   from the settings panel and saved with the configuration. Any casing works
   (`"space"` as well as old saves such as `"ENUM.KEYCODE.SPACE"` are
   canonicalised) and typing in a text field never toggles the menu.
+* **A text field never traps the keyboard** — Enter/Escape, a click anywhere else
+  in the interface (Save included), hiding the menu or closing the panel and a
+  respawn all hand it back. Without that, the focus that was left behind by a
+  configuration name swallowed every later key — the game's own jump key
+  included — until the character died.
 * **Loading animation** — a CS style boot sequence (corner brackets, a bar that
   fills while a shimmer sweeps it, a percentage counter and a stage list) that
   fades out once the interface is up; the window itself slides into place.

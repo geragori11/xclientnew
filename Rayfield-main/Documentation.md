@@ -178,6 +178,11 @@ to leave the box (the configuration name field in the settings panel uses it, so
 Save / Load always act on the name that is on screen). Nothing is written to disk
 per keystroke — the configuration is still saved when the focus leaves.
 
+A box never keeps the keyboard once the player is done with it: pressing Enter or
+Escape, clicking anything outside the box (Save included), hiding the menu,
+closing the panel and a respawn all release it. See section 14 for why that
+matters in a game.
+
 ### CreateKeybind
 ```lua
 Tab:CreateKeybind({
@@ -530,6 +535,27 @@ configuration name field or the topbar search box owns the keyboard, the open ke
 reaches the field instead of toggling the interface and keybind callbacks stay
 quiet. Hiding the menu or closing the settings panel releases the field, so the
 open key keeps working straight away.
+
+The keyboard is handed back from every side a field can trap it, so nothing has
+to be escaped before the game reacts to keys again:
+
+* **Enter / Escape** — the engine's own behaviour, unchanged;
+* **any press that misses the field** — a click or tap on Save, a slider, a tab,
+  the top bar or any other element of the interface releases it. A press *inside*
+  the box (selecting the text) is left alone;
+* **a respawn** — `LocalPlayer.CharacterAdded` releases the field, so a half
+  typed name cannot follow the player into the next life;
+* **hiding the menu / closing the panel**, as described above.
+
+The second one is the one that matters in a game: a field that kept the focus
+after a configuration name was typed swallowed *every* later key — the jump key
+included — so the character could only jump again after it had died and the
+engine cleared the focus for us. Both hooks are registered with the first window
+and disconnected again in `XClient:Destroy()`.
+
+While the caret is inside a box, Space types a space: that is what a text field
+is for, and configuration names may well contain spaces. Click anything else (or
+press Enter) once the name is complete and the key is a shortcut again.
 
 ---
 

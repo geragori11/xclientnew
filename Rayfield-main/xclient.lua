@@ -1761,6 +1761,63 @@ local function releaseTextBoxFocus()
 	end
 end
 
+--  A press that misses the field belongs to the interface, not to the text:
+--  pressing Save (or a slider, or the window) has to hand the keyboard back.
+--  A field that kept it swallowed every later keystroke - the open key and the
+--  jump key included - until the engine cleared the focus on the next respawn,
+--  which is why the game only became playable again after dying.
+local function pressInsideTextBox(box, position)
+	if not box or not position then return false end
+	local ok, inside = pcall(function()
+		local origin, size = box.AbsolutePosition, box.AbsoluteSize
+		if not origin or not size then return false end
+		--  a few pixels of slack, so the very edge still counts as the field
+		local slack = 4
+		return position.X >= origin.X - slack and position.X <= origin.X + size.X + slack
+			and position.Y >= origin.Y - slack and position.Y <= origin.Y + size.Y + slack
+	end)
+	return ok and inside == true
+end
+
+--  The two moments that hand the keyboard back, so that neither dying nor
+--  clicking the world is needed for the keys to reach the game again.  They are
+--  registered with the first window and dropped in XClient:Destroy(), so a
+--  destroyed interface never touches anybody's focus.
+local focusWatchConnections = {}
+
+local function watchKeyboardOwnership()
+	if #focusWatchConnections > 0 or not UserInputService then return end
+
+	local ok, connection = pcall(function()
+		return UserInputService.InputBegan:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseButton1
+				and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			local okBox, box = pcall(function()
+				return UserInputService:GetFocusedTextBox()
+			end)
+			if not okBox or not box then return end
+			--  a press in the text itself is the player selecting it: the
+			--  field keeps the keyboard
+			if pressInsideTextBox(box, input.Position) then return end
+			pcall(function() box:ReleaseFocus() end)
+		end)
+	end)
+	if ok and connection then
+		focusWatchConnections[#focusWatchConnections + 1] = connection
+	end
+
+	--  A respawn hands the keyboard back as well: a field the player was typing
+	--  into must not follow them into the next life.
+	if LocalPlayer then
+		local okPlayer, playerConnection = pcall(function()
+			return LocalPlayer.CharacterAdded:Connect(releaseTextBoxFocus)
+		end)
+		if okPlayer and playerConnection then
+			focusWatchConnections[#focusWatchConnections + 1] = playerConnection
+		end
+	end
+end
+
 --  Keybind --------------------------------------------------------------
 --  Contract kept from the previous interface:
 --    * CurrentKeybind / CurrentKeybind is a plain string such as "Q"
@@ -5465,6 +5522,11 @@ function XClient:CreateWindow(settings)
 	ctx.setVisible = setVisible
 	ctx.isVisible = function() return visible end
 
+	--  Handing the keyboard back (see watchKeyboardOwnership): a press that
+	--  misses the field, or a respawn.  Registered with the window so
+	--  XClient:Destroy() can drop them again.
+	watchKeyboardOwnership()
+
 	ctx.connections[#ctx.connections + 1] = UserInputService.InputBegan:Connect(function(input, processed)
 		if processed or not toggleKey or toggleKey == "" then return end
 		--  Both sides are canonical member names, so "Space" (and every other
@@ -6405,7 +6467,14 @@ function XClient:Destroy()
 		for _, connection in ipairs(activeContext.connections) do
 			pcall(function() connection:Disconnect() end)
 		end
-		activeContext = nil
+	activeContext = nil
+	end
+	--  the focus watchers belong to the interface that just went away; the next
+	--  window registers its own pair again
+	for index = #focusWatchConnections, 1, -1 do
+		local connection = focusWatchConnections[index]
+		focusWatchConnections[index] = nil
+		pcall(function() connection:Disconnect() end)
 	end
 	if screenGui and screenGui.Parent then
 		screenGui:Destroy()
