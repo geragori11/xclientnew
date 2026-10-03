@@ -139,7 +139,14 @@ local instanceMeta
 local instanceMethods = {}
 
 local function newInstance(className)
-	local self = setmetatable({ props = {}, children = {}, className = className }, instanceMeta)
+	local self = setmetatable({
+		props = {},
+		children = {},
+		--  one signal per property, handed out by GetPropertyChangedSignal
+		--  and fired by plain assignments (as the engine does)
+		changedSignals = {},
+		className = className,
+	}, instanceMeta)
 	self.props.Name = className
 	self.props.Visible = true
 	self.props.Text = ""
@@ -175,6 +182,8 @@ instanceMeta = {
 	__newindex = function(self, key, value)
 		local props = rawget(self, "props")
 		props[key] = value
+		local changed = rawget(self, "changedSignals")
+		if changed and changed[key] then changed[key]:Fire() end
 		if key == "Parent" and realType(value) == "table" and value.AddChild then
 			value:AddChild(self)
 		end
@@ -227,7 +236,15 @@ function instanceMethods.Destroy(self)
 	rawset(self, "children", {})
 end
 
-function instanceMethods.GetPropertyChangedSignal(self) return Signal.new() end
+function instanceMethods.GetPropertyChangedSignal(self, property)
+	local changed = rawget(self, "changedSignals")
+	local signal = changed[property]
+	if not signal then
+		signal = Signal.new()
+		changed[property] = signal
+	end
+	return signal
+end
 function instanceMethods.SetAttribute(self) end
 function instanceMethods.GetAttribute(self) return nil end
 function instanceMethods.IsFocused(self) return false end
@@ -1318,6 +1335,169 @@ check("flyout viewer variable repaints", XClient.Flags["modSkin"]:GetRegion("Tor
 local serialized = XClient.Flags["modSkin"]:Serialize()
 check("widget knows how to serialise its state", realType(serialized) == "table" and #serialized == 2)
 Window:HideSettings()
+
+--  ---------------------------------------------------------------- search
+--  Every check below needs the live window (section 23 tears it down), so
+--  they run here, wrapped in a function to keep the chunk's local list sane.
+local function testSearchBar()
+	print("== 22b. topbar search: filter, sections, tab hop, clear, toggle ==")
+	local searchHolder = topbarInstance:FindFirstChild("Search")
+	check("search bar on the topbar", searchHolder ~= nil and searchHolder.Visible == true)
+	local box = searchHolder and searchHolder:FindFirstChild("Box")
+	check("search box is a text box", box ~= nil and box:IsA("TextBox"))
+	--  the active "CS" profile nudges every text size by +1 (see create()), so
+	--  a 12px placeholder and a 15px caption come out as 13 and 16.
+	local CS_OFFSET = 1
+	check("placeholder + text metrics",
+		box ~= nil and box.PlaceholderText == "Search" and box.TextSize == 12 + CS_OFFSET
+		and box.TextXAlignment == Enum.TextXAlignment.Left
+		and box.TextYAlignment == Enum.TextYAlignment.Center)
+	check("query survives the click into the box", box.ClearTextOnFocus == false)
+	check("query starts out empty", box.Text == "")
+	local glass = searchHolder:FindFirstChild("Glass")
+	check("magnifier is hand drawn (ring + handle)",
+		glass ~= nil and glass:FindFirstChild("UIStroke") ~= nil and glass:FindFirstChild("Handle") ~= nil)
+	local clear = searchHolder:FindFirstChild("Clear")
+	check("clear button exists, hidden, with a drawn cross",
+		clear ~= nil and clear.Visible == false and #clear:GetChildren() >= 2)
+
+	local caption = topbarInstance:FindFirstChild("Title")
+	check("caption shortened to clear the search bar", caption ~= nil and caption.Size.X.Offset == 238)
+	check("caption keeps every glyph",
+		caption.Text == "XClient Example Window" and caption.TextSize == 15 + CS_OFFSET
+		and caption.TextTruncate == Enum.TextTruncate.None and caption.TextWrapped == false)
+
+	local rail = root:FindFirstChild("Rail")
+	check("rail scrolls when there are many tabs",
+		rail ~= nil and rail:IsA("ScrollingFrame") and rail.ScrollBarThickness == 3)
+
+	--  rows to filter: two in a second tab, three in the tab that is showing
+	local FilterTab = Window:CreateTab("FilterTab")
+	Main:Select()
+	local alpha = FilterTab:CreateToggle({ Name = "Alpha module", Flag = "searchAlpha" })
+	local beta = FilterTab:CreateToggle({ Name = "Beta module", Flag = "searchBeta" })
+	local section = Main:CreateSection("Search section")
+	local gamma = Main:CreateToggle({ Name = "Gamma module", Flag = "searchGamma" })
+	local delta = Main:CreateToggle({ Name = "Delta module", Flag = "searchDelta" })
+	local cyrillic = Main:CreateToggle({ Name = "Количество попыток", Flag = "searchCyrillic" })
+
+	box.Text = "Alpha"
+	check("a matching row stays visible", alpha.Base.row.Visible == true)
+	check("rows without a match hide",
+		beta.Base.row.Visible == false and gamma.Base.row.Visible == false
+		and delta.Base.row.Visible == false and cyrillic.Base.row.Visible == false)
+	check("search hops to the tab that holds the hit",
+		FilterTab.Page.Visible == true and Main.Page.Visible == false)
+	check("clear button shows up while filtering", clear.Visible == true)
+
+	box.Text = "delta"
+	check("hop back to the tab of the new hit",
+		Main.Page.Visible == true and FilterTab.Page.Visible == false)
+	check("a section stays while one of its rows matches",
+		section.Element.Visible == true and delta.Base.row.Visible == true)
+	check("its sibling rows hide",
+		gamma.Base.row.Visible == false and cyrillic.Base.row.Visible == false
+		and alpha.Base.row.Visible == false)
+
+	box.Text = "no-such-module"
+	check("a query with no hits hides the section", section.Element.Visible == false)
+	check("...and every row", delta.Base.row.Visible == false and gamma.Base.row.Visible == false)
+	check("...but keeps a page on screen", Main.Page.Visible == true)
+
+	box.Text = "Количество"
+	check("Cyrillic query finds the row", cyrillic.Base.row.Visible == true)
+	box.Text = "КОЛИЧЕСТВО"
+	check("Cyrillic match is case insensitive", cyrillic.Base.row.Visible == true)
+	box.Text = "попыток"
+	check("a hit in the middle of the name counts", cyrillic.Base.row.Visible == true)
+	box.Text = "количество попыток"
+	check("the whole name matches too", cyrillic.Base.row.Visible == true)
+
+	box.Text = "FilterTab"
+	check("a tab name keeps every row of that tab",
+		alpha.Base.row.Visible == true and beta.Base.row.Visible == true)
+	check("...and moves to that tab", FilterTab.Page.Visible == true)
+
+	box.Text = ""
+	check("clearing restores the rows",
+		alpha.Base.row.Visible == true and gamma.Base.row.Visible == true
+		and cyrillic.Base.row.Visible == true)
+	check("clearing restores the sections", section.Element.Visible == true)
+	check("clear button hides again", clear.Visible == false)
+
+	box.Text = "Gamma"
+	check("clear button is back while filtering", clear.Visible == true)
+	clear.MouseButton1Click:Fire()
+	check("clear button empties the query", box.Text == "" and clear.Visible == false)
+	check("...and restores the rows",
+		delta.Base.row.Visible == true and beta.Base.row.Visible == true)
+
+	--  the settings toggle drives the very same state
+	box.Text = "Alpha"
+	settingsButton.MouseButton1Click:Fire()
+	drainDeferred()
+	local panel = flyout and flyout:FindFirstChild("Body")
+	local searchRow = panel and panel:FindFirstChild("Search bar")
+	check("settings panel offers a search toggle", searchRow ~= nil)
+	local searchSwitch = searchRow and searchRow:FindFirstChild("Switch")
+	if searchSwitch then searchSwitch.MouseButton1Click:Fire() end
+	drainDeferred()
+	check("switching it off hides the bar", searchHolder.Visible == false)
+	check("...and empties the query", box.Text == "" and clear.Visible == false)
+	check("...and hands the caption its full width back", caption.Size.X.Offset == 414)
+	if searchSwitch then searchSwitch.MouseButton1Click:Fire() end
+	drainDeferred()
+	check("switching it back on shows the bar", searchHolder.Visible == true)
+	check("...and shortens the caption again", caption.Size.X.Offset == 238)
+	Window:HideSettings()
+	drainDeferred()
+
+	--  the topbar drag must not eat presses aimed at the search box
+	local parked = root.Position
+	local pointer = Vector2.new(500, 300)
+	UserInputService.props.GetMouseLocation = function() return pointer end
+	topbarInstance.InputBegan:Fire({ UserInputType = Enum.UserInputType.MouseButton1, Position = Vector2.new(400, 10) })
+	pointer = Vector2.new(530, 340)
+	UserInputService.InputChanged:Fire({ UserInputType = Enum.UserInputType.MouseMovement })
+	check("the topbar still drags the window",
+		root.Position.X.Offset == parked.X.Offset + 30 and root.Position.Y.Offset == parked.Y.Offset + 40)
+	topbarInstance.InputBegan:Fire({ UserInputType = Enum.UserInputType.MouseButton1, Position = Vector2.new(400, 10) })
+	box.InputBegan:Fire({ UserInputType = Enum.UserInputType.MouseButton1, Position = Vector2.new(400, 10) })
+	drainDeferred()
+	local heldX, heldY = root.Position.X.Offset, root.Position.Y.Offset
+	pointer = Vector2.new(760, 520)
+	UserInputService.InputChanged:Fire({ UserInputType = Enum.UserInputType.MouseMovement })
+	check("a press on the search box does not drag the window",
+		root.Position.X.Offset == heldX and root.Position.Y.Offset == heldY)
+	root.Position = parked
+	UserInputService.props.GetMouseLocation = function() return Vector2.new(500, 300) end
+
+	--  slider geometry: the whole control has to stay inside the row
+	local sliderTrack = Slider.Base.row:FindFirstChild("Track")
+	local readout = Slider.Base.row:FindFirstChild("Value")
+	check("slider track sits inside the row",
+		sliderTrack ~= nil and readout ~= nil and sliderTrack.Position.X.Offset < 0
+		and sliderTrack.Position.X.Offset + sliderTrack.Size.X.Offset <= readout.Position.X.Offset)
+	check("slider fill + knob ride on the track",
+		sliderTrack:FindFirstChild("Fill") ~= nil and sliderTrack:FindFirstChild("Knob") ~= nil)
+
+	--  an open dropdown survives a poll Refresh instead of blinking
+	Dropdown.Base.row:FindFirstChild("Selector").MouseButton1Click:Fire()
+	local openPopup = root:FindFirstChild("Popup")
+	check("dropdown popup open", openPopup ~= nil)
+	check("popup carries a click shield", openPopup:FindFirstChild("PopupShield") ~= nil)
+	Dropdown:Refresh({ "Plains", "Mountains", "Canyons" })
+	local samePopup = root:FindFirstChild("Popup")
+	check("poll Refresh keeps the very same popup open", samePopup ~= nil and samePopup == openPopup)
+	check("...with the refreshed options inside",
+		samePopup:FindFirstChild("List") ~= nil
+		and samePopup:FindFirstChild("List"):FindFirstChild("Canyons") ~= nil)
+	Dropdown.Base.row:FindFirstChild("Selector").MouseButton1Click:Fire()
+	check("selector click closes it", root:FindFirstChild("Popup") == nil)
+
+	Main:Select()
+end
+testSearchBar()
 
 print("== 23. the loading animation cleans itself up ==")
 for _ = 1, 30 do drainDeferred() end

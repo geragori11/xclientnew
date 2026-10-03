@@ -1044,7 +1044,13 @@ function builders.Slider(container, ctx, opts)
 	local controlWidth = trackWidth + 54
 	fitControl(base, controlWidth)
 	local rightEdge = -(base.controlRight)
-	track.Position = UDim2.new(1, rightEdge + 54, 0.5, 0)
+	--  The whole control group (track + value box) is right aligned: the value
+	--  box hugs the row's right edge and the track sits one control width to
+	--  its left.  The old expression used a POSITIVE offset (rightEdge + 54)
+	--  which pushed the track - and everything parented to it (fill + knob) -
+	--  completely off the right edge of the row, leaving only the "0%" read
+	--  out visible.  Keep the offset negative so the slider is on screen.
+	track.Position = UDim2.new(1, rightEdge - controlWidth, 0.5, 0)
 	valueBox.Position = UDim2.new(1, rightEdge, 0.5, 0)
 	--  keep long values (decimals, suffixes, "Infinity") inside the value box
 	fitLabel(valueBox, 44, { MinSize = 9 })
@@ -1170,6 +1176,25 @@ local function openPopup(ctx, anchor, width, height, builder)
 	local absAnchor = anchor.AbsolutePosition
 	local absRoot = root.AbsolutePosition
 	popup.Position = UDim2.fromOffset(absAnchor.X - absRoot.X, absAnchor.Y - absRoot.Y + anchor.AbsoluteSize.Y + 4)
+
+	--  Click shield.  The popup itself is a plain Frame and the gaps between
+	--  the option rows (plus the few pixels of padding around the list) are not
+	--  covered by any button, so a click there used to fall through to the
+	--  catcher below and dismiss the popup WITHOUT selecting anything - which
+	--  is exactly the "dropdown closes before I can pick" report.  This
+	--  transparent button covers the popup's own background and swallows those
+	--  stray clicks.  It is placed under the popup's contents (ZIndex 0 vs the
+	--  default 1) and, thanks to ZIndexBehaviour.Sibling, still renders above
+	--  the catcher.
+	create("TextButton", {
+		Name = "PopupShield",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 0,
+		Parent = popup,
+	})
 
 	local closed = false
 	local function close()
@@ -1378,6 +1403,17 @@ function builders.Dropdown(container, ctx, opts)
 			})
 			addList(scroll, { Padding = UDim.new(0, 4) })
 			buildList(scroll, close)
+			--  Hand the popup a way to repopulate itself in place.  A script that
+			--  polls :Refresh() on this dropdown (very common for player lists)
+			--  then no longer slams the list shut every tick - it just repaints
+			--  the rows the user is currently looking at.
+			if ctx.popup and ctx.popup.anchor == box then
+				ctx.popup.rebuild = function()
+					scroll:ClearAllChildren()
+					addList(scroll, { Padding = UDim.new(0, 4) })
+					buildList(scroll, close)
+				end
+			end
 		end)
 	end)
 
@@ -1399,7 +1435,16 @@ function builders.Dropdown(container, ctx, opts)
 		api.CurrentOption = selected
 		api.Value = selected
 		display()
-		if ctx.popup then ctx.closePopup() end
+		--  Only touch a popup THIS dropdown owns.  Closing whatever happened to
+		--  be open - another list, the colour picker, a keybind box - on every
+		--  poll is what made dropdowns appear to flicker shut.
+		if ctx.popup and ctx.popup.anchor == box then
+			if ctx.popup.rebuild then
+				ctx.popup.rebuild()
+			else
+				ctx.closePopup()
+			end
+		end
 	end
 
 	display()
@@ -4406,11 +4451,20 @@ function XClient:CreateWindow(settings)
 	divider.ZIndex = 12
 
 	--  Rail + content --------------------------------------------------
-	local rail = newFrame({
+	--  The rail carries one button per tab.  When a script registers more tabs
+	--  than fit in the window the list used to simply spill past the bottom of
+	--  the menu and paint over everything underneath, so the rail is a
+	--  ScrollingFrame now: extra tabs scroll instead of overflowing.
+	local rail = create("ScrollingFrame", {
 		Name = "Rail",
 		BackgroundColor3 = currentTheme.Rail,
+		BorderSizePixel = 0,
 		Size = UDim2.new(0, RAIL_WIDTH, 1, -TOPBAR_HEIGHT),
 		Position = UDim2.fromOffset(0, TOPBAR_HEIGHT),
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = currentTheme.Stroke,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(),
 		Parent = root,
 	})
 	rail.ZIndex = 11
@@ -4592,6 +4646,14 @@ function XClient:CreateWindow(settings)
 	--  Global settings panel (topbar gear / configuration manager) --------
 	local openGlobalSettings
 	local repaint
+
+	--  Topbar search box.  The widgets are created further down (once the tabs
+	--  infrastructure exists) but the settings panel and the drag handler need
+	--  to see them, so the names are forward declared here.
+	local searchHolder, searchBox, searchClear, applySearch, setSearchEnabled
+	local searchStroke, searchGlassStroke, searchGlassHandle, searchClearBarA, searchClearBarB
+	local searchEnabled = settings.Search ~= false and settings.SearchBar ~= false
+	local searchQuery = ""
 
 	--  Menu open key ----------------------------------------------------
 	--  Resolution order:
@@ -4801,6 +4863,15 @@ function XClient:CreateWindow(settings)
 			Callback = function()
 				setOpenKey("K")
 				XClient:Notify({ Title = "XClient", Content = "Menu open key reset to K." })
+			end,
+		})
+
+		builders.Toggle(container, ctx, {
+			Name = "Search bar",
+			Description = "Filter modules and tabs from the topbar",
+			CurrentValue = searchEnabled,
+			Callback = function(state)
+				if setSearchEnabled then setSearchEnabled(state) end
 			end,
 		})
 
@@ -5162,14 +5233,21 @@ function XClient:CreateWindow(settings)
 	XClient.Windows[#XClient.Windows + 1] = Window
 
 	local function buildRecord(record, container)
+		local built
 		if record.type == "Label" then
-			return builders.Label(container, ctx, record.arg1, record.arg2, record.arg3, record.arg4)
+			built = builders.Label(container, ctx, record.arg1, record.arg2, record.arg3, record.arg4)
 		elseif record.type == "Section" then
-			return builders.Section(container, ctx, record.name)
+			built = builders.Section(container, ctx, record.name)
 		elseif record.type == "Divider" then
-			return builders.Divider(container, ctx)
+			built = builders.Divider(container, ctx)
+		else
+			built = builders[record.type](container, ctx, record.opts)
 		end
-		return builders[record.type](container, ctx, record.opts)
+		--  Remember the built element so the topbar search can show/hide the
+		--  exact instance a record produced (rows expose .Row, labels, sections
+		--  and dividers expose .Element).
+		record.built = built
+		return built
 	end
 
 	function Window:CreateTab(name, image, ext)
@@ -5311,6 +5389,7 @@ function XClient:CreateWindow(settings)
 			for _, record in ipairs(records) do
 				buildRecord(record, page)
 			end
+			if searchQuery ~= "" and applySearch then applySearch() end
 		end
 
 		function tab:Select() showTab(page) end
@@ -5357,6 +5436,20 @@ function XClient:CreateWindow(settings)
 				entry.icon.ImageColor3 = entry.page.Visible and theme.Accent or theme.TextMuted
 			end
 		end
+		--  Topbar search box colours: it sits outside the tab pages, so the
+		--  per-page rebuild below does not reach it.
+		if searchHolder then
+			searchHolder.BackgroundColor3 = theme.Surface
+			if searchStroke then searchStroke.Color = theme.StrokeSoft end
+			if searchGlassStroke then searchGlassStroke.Color = theme.TextDim end
+			if searchGlassHandle then searchGlassHandle.BackgroundColor3 = theme.TextDim end
+			if searchClearBarA then searchClearBarA.BackgroundColor3 = theme.TextMuted end
+			if searchClearBarB then searchClearBarB.BackgroundColor3 = theme.TextMuted end
+			if searchBox then
+				searchBox.TextColor3 = theme.Text
+				searchBox.PlaceholderColor3 = theme.TextDim
+			end
+		end
 		for _, entry in ipairs(tabs) do
 			entry.page:ClearAllChildren()
 			addList(entry.page, { Padding = UDim.new(0, 6) })
@@ -5371,7 +5464,256 @@ function XClient:CreateWindow(settings)
 				buildRecord(record, entry.page)
 			end
 		end
+		--  rebuilding the rows resets their visibility, so re-apply the filter
+		if applySearch then applySearch() end
 	end
+
+	--=========================================================================
+	--  Topbar search
+	--=========================================================================
+	--  A slim module filter that lives on the title bar, level with the window
+	--  name.  Typing hides every row that does not match, hides sections that
+	--  lost all of their rows and jumps to the first tab that still has a hit;
+	--  clearing the box restores the whole menu.  A tab whose *name* matches
+	--  keeps all of its rows, so typing a tab name shows that tab in full.
+	local SEARCH_WIDTH = 200
+	local SEARCH_RIGHT = 96    -- room kept free for the three window buttons
+
+	searchHolder = newFrame({
+		Name = "Search",
+		BackgroundColor3 = currentTheme.Surface,
+		Size = UDim2.fromOffset(SEARCH_WIDTH, 24),
+		Position = UDim2.new(1, -SEARCH_RIGHT, 0.5, 0),
+		AnchorPoint = Vector2.new(1, 0.5),
+		Visible = searchEnabled,
+		Parent = topbar,
+	})
+	searchHolder.ZIndex = 14
+	addCorner(searchHolder, UDim.new(0, 6))
+	searchStroke = addStroke(searchHolder, currentTheme.StrokeSoft, 1, 0.1)
+
+	--  Hand-drawn magnifier so the bar needs no image assets.
+	local glass = newFrame({
+		Name = "Glass",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(9, 9),
+		Position = UDim2.new(0, 8, 0.5, -1),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Parent = searchHolder,
+	})
+	glass.ZIndex = 15
+	addCorner(glass, UDim.new(1, 0))
+	searchGlassStroke = addStroke(glass, currentTheme.TextDim, 1.4, 0)
+	searchGlassHandle = newFrame({
+		Name = "Handle",
+		BackgroundColor3 = currentTheme.TextDim,
+		Size = UDim2.fromOffset(4, 1.4),
+		Position = UDim2.new(0, 6, 0, 6),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Rotation = 45,
+		Parent = glass,
+	})
+	searchGlassHandle.ZIndex = 16
+
+	searchBox = create("TextBox", {
+		Name = "Box",
+		BackgroundTransparency = 1,
+		Text = "",
+		PlaceholderText = "Search",
+		PlaceholderColor3 = currentTheme.TextDim,
+		TextColor3 = currentTheme.Text,
+		Font = THEME_FONT,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Center,
+		ClearTextOnFocus = false,
+		Size = UDim2.new(1, -52, 1, 0),
+		Position = UDim2.fromOffset(24, 0),
+		Parent = searchHolder,
+	})
+	searchBox.ZIndex = 15
+
+	searchClear = create("TextButton", {
+		Name = "Clear",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(16, 16),
+		Position = UDim2.new(1, -5, 0.5, 0),
+		AnchorPoint = Vector2.new(1, 0.5),
+		Visible = false,
+		Parent = searchHolder,
+	})
+	searchClear.ZIndex = 15
+	searchClearBarA = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(7, 1.4), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Parent = searchClear })
+	searchClearBarB = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(7, 1.4), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = -45, Parent = searchClear })
+	searchClearBarA.ZIndex = 16
+	searchClearBarB.ZIndex = 16
+	--  Case folding that also understands Cyrillic (string.lower only touches
+	--  ASCII), so "кол" matches "Количество" however it was typed.
+	local function foldCase(text)
+		text = string.lower(tostring(text or ""))
+		text = text:gsub("\208([\144-\175])", function(second)
+			local n = string.byte(second)
+			if n <= 0x9F then return "\208" .. string.char(n + 0x20) end
+			return "\209" .. string.char(n - 0x20)
+		end)
+		text = text:gsub("\208\129", "\209\145")
+		text = text:gsub("^%s+", "")
+		text = text:gsub("%s+$", "")
+		return text
+	end
+
+	--  Rows expose .Row, everything else (label / section / divider / paragraph)
+	--  exposes .Element - reach whichever one the record produced.
+	local function recordRow(built)
+		if type(built) ~= "table" then return nil end
+		return built.Row or built.Element
+	end
+
+	local function recordName(record, built)
+		if type(built) == "table" and built.Name ~= nil and built.Name ~= "" then
+			return tostring(built.Name)
+		end
+		local o = record.opts
+		if o and o.Name ~= nil then return tostring(o.Name) end
+		return ""
+	end
+
+	applySearch = function()
+		local query = foldCase(searchQuery)
+		local searching = query ~= ""
+
+		local function matchesRow(name, wholeTab)
+			if not searching then return true end
+			if wholeTab then return true end
+			if name == "" then return false end
+			return string.find(foldCase(name), query, 1, true) ~= nil
+		end
+
+		local firstMatch, currentHasMatch
+		for _, entry in ipairs(tabs) do
+			local records = entry.records
+			local wholeTab = searching and string.find(foldCase(entry.name), query, 1, true) ~= nil
+			local rowMatch = {}
+			for i = 1, #records do
+				rowMatch[i] = matchesRow(recordName(records[i], records[i].built), wholeTab)
+			end
+
+			local tabHas = false
+			for i = 1, #records do
+				local record = records[i]
+				local row = recordRow(record.built)
+				if row then
+					local t = record.type
+					if t == "Section" then
+						-- resolved in the pass below
+					elseif t == "Divider" or t == "Label" or t == "Paragraph" then
+						row.Visible = not searching
+					else
+						row.Visible = rowMatch[i]
+						if rowMatch[i] then tabHas = true end
+					end
+				end
+			end
+
+			--  A section only stays while at least one of ITS rows is visible.
+			for i = 1, #records do
+				if records[i].type == "Section" then
+					local row = recordRow(records[i].built)
+					local keep = not searching
+					if searching and row then
+						for j = i + 1, #records do
+							local t = records[j].type
+							if t == "Section" then break end
+							if t ~= "Label" and t ~= "Paragraph" and t ~= "Divider" and rowMatch[j] then
+								keep = true
+								break
+							end
+						end
+					end
+					if row then row.Visible = keep end
+				end
+			end
+
+			if searching then
+				if wholeTab and #records > 0 then tabHas = true end
+				entry.searchMatch = tabHas
+				if tabHas and not firstMatch and not entry.ext then firstMatch = entry end
+				if entry.page.Visible and tabHas then currentHasMatch = true end
+			end
+		end
+
+		--  Don't leave the user staring at an empty page: hop to the first tab
+		--  that still has a matching row.
+		if searching and not currentHasMatch and firstMatch then
+			showTab(firstMatch.page)
+		end
+	end
+
+
+
+
+	--  Re-fit the caption so it never runs underneath the search box.
+	--  The caption starts at x = 16 and the three window buttons take the last
+	--  130 px of the bar (that is what its Size above reserves), so without the
+	--  search bar that is the width it gets; with the bar on it stops short of
+	--  it.  The label itself is narrowed as well, so even a forced ellipsis can
+	--  never paint over the search field.
+	local TOPBAR_TITLE_X = 16
+	local TOPBAR_TITLE_RESERVE = 130
+	--  Remember the size the caption was born with, so turning the search bar
+	--  off again restores its full size instead of freezing the shrunk one.
+	local TOPBAR_TITLE_MAX = title.TextSize or 15
+	local function fitTopbarTitle()
+		local width = WINDOW_WIDTH - TOPBAR_TITLE_X - TOPBAR_TITLE_RESERVE
+		if searchEnabled then
+			width = (WINDOW_WIDTH - SEARCH_RIGHT - SEARCH_WIDTH) - TOPBAR_TITLE_X - 10
+		end
+		if width < 48 then width = 48 end
+		title.Size = UDim2.new(0, width, 1, 0)
+		fitLabel(title, width, { MaxSize = TOPBAR_TITLE_MAX, MinSize = 11 })
+	end
+
+	setSearchEnabled = function(state)
+		searchEnabled = state and true or false
+		if searchHolder then searchHolder.Visible = searchEnabled end
+		if not searchEnabled and searchBox and searchBox.Text ~= "" then
+			searchBox.Text = ""
+		end
+		searchQuery = (searchBox and searchBox.Text) or ""
+		if applySearch then applySearch() end
+		fitTopbarTitle()
+	end
+
+	searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		searchQuery = searchBox.Text
+		searchClear.Visible = foldCase(searchQuery) ~= ""
+		applySearch()
+	end)
+
+	searchClear.MouseButton1Click:Connect(function()
+		searchBox.Text = ""
+		searchQuery = ""
+		searchClear.Visible = false
+		applySearch()
+	end)
+
+	--  The topbar drag handler also catches clicks that land on the search box
+	--  (it is a child of the topbar); undo that on the next step so selecting
+	--  or editing text never drags the window around.  Hooked on both the bar
+	--  and the box so it works no matter which object the input targets.
+	local function guardDrag(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			task.defer(function() dragging = false end)
+		end
+	end
+	searchHolder.InputBegan:Connect(guardDrag)
+	searchBox.InputBegan:Connect(guardDrag)
+
+	--  Apply the initial state (also re-fits the title bar caption).
+	setSearchEnabled(searchEnabled)
+
 
 	--  The library keeps a handle on this window's repaint, so SetFont()
 	--  reaches every interface that is currently on screen.
