@@ -1934,23 +1934,31 @@ if exampleChunk then
 end
 
 print("== 25. loader.lua (disk cache) ==")
---  Serve a fake repository: the GitHub API reports the latest commit hash and
---  the raw endpoint returns the library.  The request counters let us prove the
---  short version probe replaces the full download on the second run.
-local apiCalls, rawCalls = 0, 0
+--  Serve a fake repository: version.txt holds the manual build tag, the GitHub
+--  API reports the latest commit hash and the raw endpoint returns the library.
+--  The request counters let us prove the short version probe replaces the full
+--  download on the second run.
+local apiCalls, rawCalls, markerCalls = 0, 0, 0
 local remoteSha = "sha-aaaa"
+local publishedTag = "1.0.5"
+local servedSource = librarySource
 game.HttpGet = function(_, url)
+	if string.find(url, "version.txt", 1, true) then
+		markerCalls = markerCalls + 1
+		--  A few bytes only: the loader has to accept short markers (the shared
+		--  request helper treats bodies under 50 bytes as error pages).
+		return publishedTag .. "\n"
+	end
 	if string.find(url, "api.github.com", 1, true) then
 		apiCalls = apiCalls + 1
-		--  The reply has to look like the real one: requestHTTP() ignores
-		--  bodies of 50 bytes or less, and the loader reads the newest commit
-		--  hash from the first entry.
+		--  The reply has to look like the real one: the loader reads the newest
+		--  commit hash from the first entry.
 		return string.format(
 			'[{"sha":"%s","node_id":"C_kwDOJ0000000000000000000","html_url":"https://github.com/dev/XClient/commit/%s"}]',
 			remoteSha, remoteSha)
 	end
 	rawCalls = rawCalls + 1
-	return librarySource
+	return servedSource
 end
 game.HttpGetAsync = game.HttpGet
 
@@ -1962,25 +1970,33 @@ if isfile("XClient/.version") then delfile("XClient/.version") end
 local FirstLoad = dofile("loader.lua")
 check("first run returns the library", realType(FirstLoad) == "table" and FirstLoad.Flags ~= nil)
 check("first run wrote the cache file", isfile("XClient/xclient.lua"))
-check("first run remembered the version", isfile("XClient/.version") and readfile("XClient/.version") == "sha-aaaa")
+check("first run remembered the build tag", isfile("XClient/.version") and readfile("XClient/.version") == "1.0.5")
 check("first run downloaded the library", rawCalls == 1)
-check("first run probed the version", apiCalls == 1)
+check("first run probed version.txt", markerCalls >= 1)
+check("first run did not need the API", apiCalls == 0)
 
---  second run: same version -> only the short probe, the file comes from disk
-apiCalls, rawCalls = 0, 0
+--  second run: same version -> only the tiny marker request, file served from disk
+apiCalls, rawCalls, markerCalls = 0, 0, 0
 local SecondLoad = dofile("loader.lua")
 check("second run returns the library", realType(SecondLoad) == "table")
 check("second run skipped the download", rawCalls == 0)
-check("second run did the short version request", apiCalls == 1)
+check("second run did the short version request", markerCalls >= 1)
+check("second run did not need the API", apiCalls == 0)
 check("loader is exposed in the environment", realType(getgenv().XClientLoader) == "table")
 
---  a new commit -> the cache is refreshed
-remoteSha = "sha-bbbb"
-apiCalls, rawCalls = 0, 0
+--  a newly published tag -> the cache is refreshed
+publishedTag = "1.0.6"
+servedSource = string.gsub(librarySource, 'XClient%.Build = "1%.0%.5"', 'XClient.Build = "1.0.6"', 1)
+apiCalls, rawCalls, markerCalls = 0, 0, 0
 local ThirdLoad = dofile("loader.lua")
-check("new version detected and downloaded", rawCalls == 1 and apiCalls >= 1)
-check("cache refreshed on disk", readfile("XClient/.version") == "sha-bbbb")
+check("new tag detected and downloaded", rawCalls == 1 and markerCalls >= 1)
+check("cache refreshed on disk", readfile("XClient/.version") == "1.0.6")
 check("new version still loads", realType(ThirdLoad) == "table")
+
+--  and the run after the update is back to the cached copy
+apiCalls, rawCalls, markerCalls = 0, 0, 0
+local FourthLoad = dofile("loader.lua")
+check("the updated cache is reused", realType(FourthLoad) == "table" and rawCalls == 0)
 
 --  the repository is unreachable -> the cached copy keeps the script working
 game.HttpGet = function() error("offline") end
@@ -1988,10 +2004,34 @@ local OfflineLoad = dofile("loader.lua")
 check("offline falls back to the cache", realType(OfflineLoad) == "table")
 
 --  utilities: version read + clear
-check("GetVersion reads the marker", getgenv().XClientLoader:GetVersion() == "sha-bbbb")
+check("GetVersion reads the cached build tag", getgenv().XClientLoader:GetVersion() == "1.0.6")
 getgenv().XClientLoader:ClearCache()
 check("ClearCache removed the library", isfile("XClient/xclient.lua") == false)
 check("ClearCache removed the marker", isfile("XClient/.version") == false)
+
+--  repositories without version.txt keep working through the API hash
+getgenv().XClientLoaderOptions = { VersionFile = "" }
+publishedTag = nil
+game.HttpGet = function(_, url)
+	if string.find(url, "api.github.com", 1, true) then
+		apiCalls = apiCalls + 1
+		return string.format(
+			'[{"sha":"%s","node_id":"C_kwDOJ0000000000000000000","html_url":"https://github.com/dev/XClient/commit/%s"}]',
+			remoteSha, remoteSha)
+	end
+	rawCalls = rawCalls + 1
+	return librarySource
+end
+game.HttpGetAsync = game.HttpGet
+apiCalls, rawCalls = 0, 0
+local ApiLoad = dofile("loader.lua")
+check("API fallback downloads the library", realType(ApiLoad) == "table" and rawCalls == 1 and apiCalls >= 1)
+check("API fallback remembers the commit hash", readfile("XClient/.version") == remoteSha)
+apiCalls, rawCalls = 0, 0
+local ApiSecondLoad = dofile("loader.lua")
+check("API fallback reuses the cache", realType(ApiSecondLoad) == "table" and rawCalls == 0 and apiCalls >= 1)
+getgenv().XClientLoaderOptions = nil
+
 
 print("")
 print(string.format("%d checks, %d failures", total, failures))

@@ -105,11 +105,19 @@ local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
 ```
 
 * **first run** — downloads `xclient.lua`, writes it to `XClient/xclient.lua`
-  with `writefile` and remembers the remote version;
-* **later runs** — fetches only the version / hash with a short request and, when
-  it has not changed, loads the saved file straight from disk with `readfile`;
+  with `writefile` and remembers its build tag;
+* **later runs** — fetches only `version.txt` (a few bytes, from the same host
+  that serves the library) and, when it matches the `XClient.Build` tag of the
+  file on disk, loads that file straight from `readfile`. No GitHub API, so
+  there is no rate limit to run into;
 * **a new version** — re-downloads the library and refreshes the cache;
+* **version request blocked** — verifies the cached copy against the repository
+  and refreshes it when needed, so a published fix is never missed;
 * **offline** — keeps using the cached copy.
+
+Version bumps are manual: change `XClient.Build` in `xclient.lua`, run
+`lua _mkversion.lua` to refresh `version.txt`, and push both files. The loader
+warns when the two disagree.
 
 Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
 `Documentation.md` section 17 covers the configuration and the helper methods
@@ -121,10 +129,13 @@ Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
 | --- | --- |
 | `xclient.lua` | the whole library |
 | `loader.lua` | optional disk-cached auto-loader for `xclient.lua` |
+| `version.txt` | manual build tag published for `loader.lua` (kept in sync by `_mkversion.lua`) |
 | `example.lua` | example script / compatibility demo |
 | `Documentation.md` | API reference |
 | `icons.lua` | optional Lucide icon sheets used by `XClient.Icons` |
 | `_devtest.lua` | development harness: runs the library inside a small Roblox shim (`lua _devtest.lua`) |
+| `_loadertest.lua` | development harness: checks `loader.lua`'s cache/update decisions offline (`lua _loadertest.lua`) |
+| `_mkversion.lua` | development tool: writes `version.txt` from `xclient.lua`'s build tag (`lua _mkversion.lua [--check]`) |
 | `LICENSE` | licence |
 
 `_devtest.lua` is a developer tool, not part of the library — it needs plain

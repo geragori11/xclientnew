@@ -860,16 +860,17 @@ Behaviour:
 | Situation | What happens |
 | --- | --- |
 | First run (no cache) | downloads `xclient.lua`, runs it and writes it to the cache with `writefile` |
-| Later run, same version | one short version request, then the saved file is loaded from disk with `readfile` |
+| Later run, same version | one tiny request for `version.txt`, then the saved file is loaded from disk with `readfile` |
 | New version published | re-downloads `xclient.lua`, refreshes the cache and runs the fresh copy |
-| Version request fails / offline | keeps using the cached copy |
+| Version request fails, library reachable | the cached copy is verified against the repository first, so a published fix is never missed |
+| Repository unreachable (real offline) | keeps using the cached copy |
 
 Files (inside the executor's workspace folder):
 
 | Path | Purpose |
 | --- | --- |
 | `XClient/xclient.lua` | the cached library |
-| `XClient/.version` | the last seen remote version / hash |
+| `XClient/.version` | the version the loader matched: the build tag of the cached file, or the commit hash when the version came from the API |
 
 ### Configuration
 
@@ -878,19 +879,59 @@ Edit `Loader.Config` at the top of `loader.lua`:
 | Key | Default | Description |
 | --- | --- | --- |
 | `User`, `Repo`, `Branch`, `File` | placeholder | where the library lives on GitHub |
-| `VersionURL` | `nil` | optional tiny marker file (e.g. `version.txt`) used instead of the GitHub API |
+| `VersionFile` | `"version.txt"` | tiny published marker holding the manual build tag, next to `File` |
+| `VersionURL` | `nil` | optional explicit marker URL (overrides the URL derived from `VersionFile`) |
 | `Folder` | `"XClient"` | cache folder |
 | `CacheFile` | `"xclient.lua"` | cached library name |
-| `MarkerFile` | `".version"` | cached version marker name |
+| `MarkerFile` | `".version"` | cached build tag name |
 | `Cache` | `true` | `false` always re-downloads (handy while editing) |
-| `Offline` | `true` never touches the network | use the cached copy only |
+| `Offline` | `false` | `true` never touches the network and uses the cached copy only |
+| `VerifyCache` | `true` | `false` trusts the cached copy when the build tag cannot be read (old behaviour) |
 
-**Version source.** With `VersionURL = nil` the loader asks the GitHub API for the
-hash of the latest commit that touched `File`
-(`/repos/<User>/<Repo>/commits?path=<File>&per_page=1`) — it changes on its own
-every time the library is pushed, so there is nothing to keep in sync by hand.
-Point `VersionURL` at a small published marker (the loader fetches it instead)
-for a shorter request and no API rate limit.
+**Manual version, no API.** `version.txt` next to the library holds one short
+token, e.g. `1.0.5`. The very same token is declared inside the library as
+`XClient.Build = "1.0.5"`, so there are two things the loader can compare:
+
+* the tag published on GitHub (`version.txt`, a few bytes from the same host
+  that serves `xclient.lua`), and
+* the tag of the copy **on disk** — read straight out of the cached file's own
+  `XClient.Build` line.
+
+The cache is reused only when those two agree (or when the stored
+`XClient/.version` already matches); a mismatch re-downloads `xclient.lua`.
+Nothing here needs the GitHub API, so a rate limit or a blocked `api.github.com`
+can no longer freeze an old copy: with `VersionFile` set, the API is not asked
+at all. The API hash is only a fallback for when no marker file is published —
+in that mode the loader records the commit hash it matched, because that is the
+only value that can confirm the cache next time. Set `VersionFile = ""` to force
+that fallback.
+
+Because the file on disk is identified by its own build tag, a marker written by
+an older loader (a commit hash) can no longer pin a stale cache — the tag of the
+file wins.
+
+**Bumping the version.** Change `XClient.Build` in `xclient.lua`, then run
+
+```bash
+lua _mkversion.lua          # writes version.txt from the build tag
+lua _mkversion.lua --check  # exit 1 when the two disagree (useful before pushing)
+```
+
+and push `xclient.lua` + `version.txt` together. If the two are out of sync the
+loader still works — it runs what it downloaded — but it warns
+`version.txt says 'X' but the published file declares 'Y'` and keeps refreshing
+until both are bumped.
+
+When the marker request fails the loader does **not** silently keep the old
+file: it re-downloads `xclient.lua`, refreshes the cache and runs the fresh
+copy, and only falls back to the stored copy when the repository is genuinely
+unreachable. Set `VerifyCache = false` to trust the cache without checking, or
+`Offline = true` to skip the network entirely.
+
+`Loader.Version` (`getgenv().XClientLoader.Version`) tells you which loader is
+running — useful to confirm that a newly pushed `loader.lua` actually reached
+the executor. The cache decisions above are covered offline by
+`_loadertest.lua` (`lua _loadertest.lua`).
 
 **Overriding without editing the file.** Set `getgenv().XClientLoaderOptions`
 before loading it:
@@ -906,7 +947,7 @@ The loader is also exposed as `getgenv().XClientLoader`:
 
 ```lua
 local Loader = getgenv().XClientLoader
-Loader:GetVersion()        -- the version stored in the cache
+Loader:GetVersion()        -- build tag of the file in the cache
 Loader:CheckForUpdate()    -- remoteVersion, hasUpdate
 Loader:Update()            -- force a re-download into the cache (does not run it)
 Loader:ClearCache()        -- remove the cached library and its marker

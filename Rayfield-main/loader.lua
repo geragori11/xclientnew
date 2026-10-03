@@ -28,7 +28,7 @@
 =========================================================================]]
 
 local Loader = {}
-Loader.Version = "1.0.3"
+Loader.Version = "1.0.5"
 
 --=========================================================================
 --  1. CONFIGURATION
@@ -42,6 +42,15 @@ Loader.Config = {
 
     DirectURL = "https://raw.githubusercontent.com/geragori11/xclientnew/refs/heads/main/Rayfield-main/xclient.lua",
 
+    --  Manual version check - no GitHub API, no rate limit.
+    --  "version.txt" is published next to File and holds exactly the string the
+    --  library declares in its own 'XClient.Build = "..."' line. The loader
+    --  compares that published tag with the build tag of the file on disk, so
+    --  it always knows which version it holds and which one is on GitHub.
+    VersionFile = "version.txt",
+
+    --  Optional explicit URL for the marker; when nil it is derived from
+    --  User/Repo/Branch and the folder of File.
     VersionURL = nil,
 
     Folder     = "XClient",
@@ -50,6 +59,14 @@ Loader.Config = {
 
     Cache   = true,
     Offline = false,
+
+    --  What to do when the repository version cannot be read (the GitHub API
+    --  is rate limited or blocked in most executors):
+    --    true  -> verify the copy on disk against the repository before using
+    --             it, so a fix pushed to GitHub always reaches the player;
+    --    false -> trust the copy on disk anyway (old behaviour, can pin an
+    --             outdated library on disk indefinitely).
+    VerifyCache = true,
 }
 
 --=========================================================================
@@ -117,23 +134,38 @@ local function ensureFolder(path)
     end
 end
 
-local function requestHTTP(url)
+local function notify(message)
+    if type(warn) == "function" then
+       pcall(warn, message)
+    elseif type(print) == "function" then
+       pcall(print, message)
+    end
+end
+
+--  minLength defaults to 50 bytes: a shorter body is almost always an error
+--  page ("404: Not Found" is 14 bytes). Version markers are tiny, so
+--  fetchMarkerVersion asks for a floor of 1 byte instead.
+local function requestHTTP(url, minLength)
     if type(url) ~= "string" or url == "" then return nil end
+    if type(minLength) ~= "number" then minLength = 50 end
+
+    local function usable(body)
+       return type(body) == "string"
+          and #body >= minLength
+          and not body:find("404: Not Found", 1, true)
+          and not body:find("<!DOCTYPE html>", 1, true)
+    end
 
     if type(game) == "table" and type(game.HttpGet) == "function" then
        local ok, body = pcall(function()
           return game:HttpGet(url)
        end)
-       if ok and type(body) == "string" and #body > 50 and not body:find("404: Not Found") and not body:find("<!DOCTYPE html>") then
-          return body
-       end
+       if ok and usable(body) then return body end
 
        ok, body = pcall(function()
           return game:HttpGet(url, true)
        end)
-       if ok and type(body) == "string" and #body > 50 and not body:find("404: Not Found") and not body:find("<!DOCTYPE html>") then
-          return body
-       end
+       if ok and usable(body) then return body end
     end
 
     local customReq = (syn and syn.request) or (http and http.request) or http_request or request
@@ -142,7 +174,7 @@ local function requestHTTP(url)
           Url = url,
           Method = "GET"
        })
-       if ok and type(res) == "table" and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 50 then
+       if ok and type(res) == "table" and res.StatusCode == 200 and usable(res.Body) then
           return res.Body
        end
     end
@@ -181,9 +213,68 @@ local function normalizeVersion(text)
     return text
 end
 
+--  Build tag baked into the library itself ('XClient.Build = "..."'), i.e. the
+--  version of the file *on disk*. Reading it means the loader does not depend
+--  on the stored marker to know what it holds: the marker may be missing, or
+--  written by an older loader as a commit hash.
+local function versionFromSource(source)
+    if type(source) ~= "string" then return nil end
+    return normalizeVersion(string.match(source, 'XClient%.Build%s*=%s*"([^"]+)"'))
+end
+
+--  What to remember next to the cached file. When the published *marker* (a
+--  manual tag) is what we matched against, the build tag of the file is the
+--  honest answer; when the version came from the API (a commit hash) that hash
+--  is the only value that can match again on the next run, otherwise the cache
+--  would be thrown away on every injection.
+local function versionToRemember(source, remoteVersion, remoteSource)
+    local build = versionFromSource(source)
+    if remoteSource == "marker" then return build or remoteVersion end
+    return remoteVersion or build
+end
+
+--  URLs of the published version marker (version.txt), cache-busted form first:
+--  raw.githubusercontent and most executors may serve a stale cached body.
+local function markerURLs(cfg)
+    local cleanBranch = tostring(cfg.Branch or "main"):gsub("^refs/heads/", "")
+    local bust = tostring(os and os.time and os.time() or math.random(100000, 999999))
+    local list = {}
+
+    local function push(url)
+       if type(url) ~= "string" or url == "" then return end
+       local separator = url:find("?", 1, true) and "&" or "?"
+       list[#list + 1] = url .. separator .. "t=" .. bust
+       list[#list + 1] = url
+    end
+
+    push(cfg.VersionURL)
+
+    if cfg.VersionFile and cfg.VersionFile ~= "" then
+       local folder = string.match(tostring(cfg.File or ""), "^(.*)/[^/]+$")
+       local path = folder and (folder .. "/" .. cfg.VersionFile) or cfg.VersionFile
+       push(string.format("https://raw.githubusercontent.com/%s/%s/refs/heads/%s/%s",
+          cfg.User, cfg.Repo, cleanBranch, path))
+    end
+
+    return list
+end
+
+--  A published version marker is a single short token ("1.0.5"). Anything else
+--  (an HTML error page, a proxy notice) is ignored so that a junk response can
+--  never be mistaken for a version.
+local function isVersionTag(text)
+    return type(text) == "string"
+       and #text > 0
+       and #text <= 64
+       and text:match("^[%w][%w%.%-_]*$") ~= nil
+end
+
 local function fetchMarkerVersion(cfg)
-    if not cfg.VersionURL then return nil end
-    return normalizeVersion(requestHTTP(cfg.VersionURL))
+    for _, url in ipairs(markerURLs(cfg)) do
+       local version = normalizeVersion(requestHTTP(url, 1))
+       if isVersionTag(version) then return version end
+    end
+    return nil
 end
 
 local function fetchApiVersion(cfg)
@@ -205,7 +296,11 @@ local function fetchApiVersion(cfg)
 end
 
 local function resolveRemoteVersion(cfg)
-    return fetchMarkerVersion(cfg) or fetchApiVersion(cfg)
+    local marker = fetchMarkerVersion(cfg)
+    if marker then return marker, "marker" end
+    local hash = fetchApiVersion(cfg)
+    if hash then return hash, "api" end
+    return nil, nil
 end
 
 --=========================================================================
@@ -266,8 +361,9 @@ function Loader:Fetch(options)
     if type(source) ~= "string" then return nil, "the repository is unreachable" end
     if cfg.Cache then
        writeCache(cfg, source)
-       local remoteVersion = resolveRemoteVersion(cfg)
-       if remoteVersion then writeMarker(cfg, remoteVersion) end
+       local remoteVersion, remoteSource = resolveRemoteVersion(cfg)
+       local version = versionToRemember(source, remoteVersion, remoteSource)
+       if version then writeMarker(cfg, version) end
     end
     local library, loadError = runSource(source, cfg.File)
     if not library then return nil, loadError end
@@ -279,15 +375,24 @@ function Loader:Load(options)
     local cfg = withOptions(options)
 
     local cachedSource  = cfg.Cache and readCache(cfg) or nil
-    local cachedVersion = readMarker(cfg)
+    local cachedVersion = readMarker(cfg)                   -- tag recorded last time
+    local cachedBuild   = versionFromSource(cachedSource)   -- tag of the file itself
 
-    local remoteVersion = nil
+    local remoteVersion, remoteSource = nil, nil
     if not cfg.Offline then
-       remoteVersion = resolveRemoteVersion(cfg)
+       remoteVersion, remoteSource = resolveRemoteVersion(cfg)   -- tag published on GitHub
     end
 
-    local upToDate = cachedSource ~= nil
-       and (cfg.Offline or remoteVersion == nil or remoteVersion == cachedVersion)
+    --  The copy on disk is current when the published version matches either the
+    --  marker we stored or the build tag inside the file itself - the file's own
+    --  tag is what makes the check reliable, because older loaders wrote commit
+    --  hashes into the marker (which would never match a manual tag again).
+    --  "version unknown" means "verify", not "up to date": that assumption used
+    --  to pin a stale file on disk forever whenever the version lookup failed.
+    local sameVersion = remoteVersion ~= nil
+       and (remoteVersion == cachedVersion or remoteVersion == cachedBuild)
+    local trustCache = cfg.Offline or (remoteVersion == nil and cfg.VerifyCache == false)
+    local upToDate = cachedSource ~= nil and (trustCache or sameVersion)
 
     local usedCache = false
     local source = nil
@@ -296,18 +401,28 @@ function Loader:Load(options)
        source = cachedSource
        usedCache = true
        if remoteVersion and remoteVersion ~= cachedVersion then
-          writeMarker(cfg, remoteVersion)
+          --  The match came from the build tag inside the file, so keep the
+          --  marker honest about what is actually on disk.
+          writeMarker(cfg, cachedBuild or remoteVersion)
        end
     else
+       if cachedSource and remoteVersion == nil and not cfg.Offline then
+          notify("[XClient loader] the published version could not be read; verifying the cached copy against the repository.")
+       end
        source = downloadFile(cfg)
        if source then
           if cfg.Cache then
-             writeCache(cfg, source)
-             if remoteVersion then
-                writeMarker(cfg, remoteVersion)
-             else
-                writeMarker(cfg, tostring(os and os.time and os.time() or "1"))
+             local freshBuild = versionFromSource(source)
+             if remoteVersion and freshBuild and freshBuild ~= remoteVersion then
+                notify(string.format(
+                   "[XClient loader] version.txt says '%s' but the published file declares '%s' - run 'lua _mkversion.lua' and push both.",
+                   tostring(remoteVersion), tostring(freshBuild)))
              end
+             writeCache(cfg, source)
+             --  Remember what we matched against: the build tag of the file when
+             --  the manual marker was the source, otherwise the published value.
+             writeMarker(cfg, versionToRemember(source, remoteVersion, remoteSource)
+                or tostring(os and os.time and os.time() or "1"))
           end
        elseif cachedSource then
           source = cachedSource
@@ -325,7 +440,8 @@ function Loader:Load(options)
        if fresh then
           if cfg.Cache then
              writeCache(cfg, fresh)
-             local freshVersion = remoteVersion or resolveRemoteVersion(cfg)
+             local freshRemote, freshSource = resolveRemoteVersion(cfg)
+             local freshVersion = versionToRemember(fresh, freshRemote or remoteVersion, freshSource or remoteSource)
              if freshVersion then writeMarker(cfg, freshVersion) end
           end
           library, loadError = runSource(fresh, cfg.File)
@@ -345,14 +461,21 @@ end
 --=========================================================================
 
 function Loader:GetVersion(options)
-    return readMarker(withOptions(options))
+    local cfg = withOptions(options)
+    --  The version of the file on disk (its own build tag), falling back to the
+    --  tag recorded next to it.
+    return versionFromSource(readCache(cfg)) or readMarker(cfg)
 end
 
 function Loader:CheckForUpdate(options)
     local cfg = withOptions(options)
-    local localVersion = readMarker(cfg)
+    local localVersion = versionFromSource(readCache(cfg)) or readMarker(cfg)
     local remoteVersion = resolveRemoteVersion(cfg)
-    return remoteVersion, (remoteVersion ~= nil and remoteVersion ~= localVersion)
+    --  Same rule Load() uses: an update is due when the published version
+    --  matches neither the recorded marker nor the tag inside the cached file.
+    return remoteVersion, (remoteVersion ~= nil
+       and remoteVersion ~= localVersion
+       and remoteVersion ~= readMarker(cfg))
 end
 
 function Loader:Update(options)
@@ -360,8 +483,9 @@ function Loader:Update(options)
     local source = downloadFile(cfg)
     if type(source) ~= "string" then return false end
     local ok = writeCache(cfg, source)
-    local remoteVersion = resolveRemoteVersion(cfg)
-    if remoteVersion then writeMarker(cfg, remoteVersion) end
+    local remoteVersion, remoteSource = resolveRemoteVersion(cfg)
+    local version = versionToRemember(source, remoteVersion, remoteSource)
+    if version then writeMarker(cfg, version) end
     return ok and true or false
 end
 
