@@ -1623,6 +1623,22 @@ function builders.Input(container, ctx, opts)
 		ctx.saveConfiguration()
 	end
 
+	--  Live update: hand every keystroke over instead of waiting for the focus
+	--  to leave the box.  The settings panel reads the name of a configuration
+	--  the moment Save / Load is pressed, and clicking a button does not always
+	--  take the focus away from the field.  Nothing is written to disk here -
+	--  only fire() does that - and :Set() keeps firing the callback just once.
+	local programmatic = false
+	if opts.LiveUpdate then
+		box:GetPropertyChangedSignal("Text"):Connect(function()
+			if programmatic then return end
+			value = box.Text
+			api.CurrentValue = value
+			api.Value = value
+			callSafe(opts.Callback, value)
+		end)
+	end
+
 	box.Focused:Connect(function()
 		stroke.Color = theme.Accent
 		box.BackgroundColor3 = theme.SurfaceHover
@@ -1639,13 +1655,17 @@ function builders.Input(container, ctx, opts)
 
 	function api:Set(text)
 		text = tostring(text or "")
+		programmatic = true
 		box.Text = text
+		programmatic = false
 		fire()
 	end
 
 	function api:SetSilent(text)
 		text = tostring(text or "")
+		programmatic = true
 		box.Text = text
+		programmatic = false
 		value = text
 		api.CurrentValue = value
 		api.Value = value
@@ -1693,6 +1713,17 @@ local function resolveKeyName(value)
 
 	local canonical = keyCodeLookup[string.lower(value)]
 	if canonical == nil then
+		--  tostring(EnumItem) is "Enum.KeyCode.Space" - exactly what the
+		--  previous interface wrote into its configuration files (and what
+		--  SetOpenKey(Enum.KeyCode.Space) stored) - and "KeyCode.Space" is
+		--  the short form of the same thing.  Both are stripped down to the
+		--  member name, so an old save still arms the bind instead of
+		--  clearing it.
+		local member = string.lower(value)
+		member = member:match("^enum%.[%w]+%.(%w+)$") or member:match("^keycode%.(%w+)$")
+		if member then canonical = keyCodeLookup[member] end
+	end
+	if canonical == nil then
 		--  Codes added after this build, or environments that cannot
 		--  enumerate the Enum, still resolve by their exact member name.
 		local ok, code = pcall(function() return Enum.KeyCode[value] end)
@@ -1703,6 +1734,31 @@ local function resolveKeyName(value)
 	end
 	if canonical == nil or canonical == "Unknown" then return nil end
 	return canonical
+end
+
+--  Keyboard ownership ----------------------------------------------------
+--  While a TextBox owns the keyboard the menu must keep its hands off it:
+--  typing the name of a configuration - including the spaces in it - has to
+--  reach the field and nothing else.  The engine flags such keystrokes as
+--  processed, but that flag is not reliable in every environment, so the
+--  service is asked directly.
+local function textBoxFocused()
+	local ok, box = pcall(function()
+		return UserInputService and UserInputService:GetFocusedTextBox()
+	end)
+	return ok and box ~= nil
+end
+
+--  Hands the keyboard back when the field that owned it goes away (the menu
+--  is hidden, the settings flyout closes).  A box that is off screen but
+--  still focused would swallow every keystroke, the open key included.
+local function releaseTextBoxFocus()
+	local ok, box = pcall(function()
+		return UserInputService and UserInputService:GetFocusedTextBox()
+	end)
+	if ok and box then
+		pcall(function() box:ReleaseFocus() end)
+	end
 end
 
 --  Keybind --------------------------------------------------------------
@@ -1774,6 +1830,9 @@ function builders.Keybind(container, ctx, opts)
 	end
 
 	box.MouseButton1Click:Connect(function()
+		--  Clicking the box starts a rebind, so the keyboard belongs to the
+		--  menu again even if a text field had it a moment ago.
+		releaseTextBoxFocus()
 		listening = not listening
 		display()
 	end)
@@ -1789,6 +1848,9 @@ function builders.Keybind(container, ctx, opts)
 			return
 		end
 		if processed or opts.CallOnChange then return end
+		--  A keystroke that is being typed into a text field (the name of a
+		--  configuration, the search bar) is not a shortcut.
+		if textBoxFocused() then return end
 		if matches(input) then
 			if holdToInteract then
 				held = true
@@ -4916,6 +4978,10 @@ function XClient:CreateWindow(settings)
 		settingsTarget = nil
 		--  Any dropdown / colour picker opened inside the flyout must go too.
 		ctx.closePopup()
+		--  The configuration name field lives in here: closing the panel has
+		--  to hand the keyboard back, otherwise an invisible box keeps
+		--  eating every keystroke.
+		releaseTextBoxFocus()
 		tween(flyout, 0.16, { Position = UDim2.fromOffset(-(PANEL_WIDTH + PANEL_GAP), 0) })
 		task.delay(0.18, function()
 			if not flyoutOpen and flyout and flyout.Parent then
@@ -5039,7 +5105,19 @@ function XClient:CreateWindow(settings)
 	}
 
 	local function setOpenKey(value)
-		local key = normalizeKey(value) or ""
+		local key = normalizeKey(value)
+		if key == nil then
+			--  "No key bound" is asked for with an empty string (or with
+			--  Unknown); any other value this build cannot read - an old
+			--  configuration may hold "Enum.KeyCode.Space" - must never throw
+			--  the bind that is in force away, or the interface would become
+			--  impossible to open.
+			local text = tostring(value or "")
+			local enumItem = typeof(value) == "EnumItem"
+			if text ~= "" and text ~= "Enum.KeyCode.Unknown" then return false end
+			if enumItem and text == "" then return false end
+			key = ""
+		end
 		toggleKey = key
 		openKeyElement.CurrentKeybind = key
 		openKeyElement.Value = key
@@ -5051,6 +5129,7 @@ function XClient:CreateWindow(settings)
 				or "No menu key bound"
 			fitLabel(openKeyHint, PANEL_WIDTH - 24, { MaxSize = 12, MinSize = 9, Wrap = true })
 		end
+		return true
 	end
 
 	function openKeyElement:Set(value) setOpenKey(value) end
@@ -5094,6 +5173,9 @@ function XClient:CreateWindow(settings)
 			Name = "Config file name",
 			CurrentValue = configName,
 			PlaceholderText = "Config name",
+			--  Save / Load / Delete act on the name that is on screen, even if
+			--  the field still has the focus when the button is pressed.
+			LiveUpdate = true,
 			Callback = function(text) configName = text end,
 		})
 
@@ -5374,6 +5456,10 @@ function XClient:CreateWindow(settings)
 			--  Popups live on the window, so dismiss any open one with it.
 			ctx.closePopup()
 			closeFlyout()
+			--  A hidden interface must not keep the keyboard: the open key
+			--  would be typed into an invisible field instead of toggling the
+			--  menu back on.
+			releaseTextBoxFocus()
 		end
 	end
 	ctx.setVisible = setVisible
@@ -5383,6 +5469,9 @@ function XClient:CreateWindow(settings)
 		if processed or not toggleKey or toggleKey == "" then return end
 		--  Both sides are canonical member names, so "Space" (and every other
 		--  CamelCase code) matches whatever casing the bind was stored with.
+		--  While a text field owns the keyboard the key belongs to the field:
+		--  typing "my config" must not make the interface disappear.
+		if textBoxFocused() then return end
 		if resolveKeyName(input.KeyCode) == toggleKey then
 			setVisible(not visible)
 		end

@@ -31,7 +31,9 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
 * **Captions always fit** — every caption is measured and either shrunk or
   wrapped onto a second line, both in tabs and in the narrower settings flyout.
 * **Menu open key** — `CreateWindow({ OpenKey = "RightShift" })`, rebindable
-  from the settings panel and saved with the configuration.
+  from the settings panel and saved with the configuration. Any casing works
+  (`"space"` as well as old saves such as `"ENUM.KEYCODE.SPACE"` are
+  canonicalised) and typing in a text field never toggles the menu.
 * **Loading animation** — a CS style boot sequence (corner brackets, a bar that
   fills while a shimmer sweeps it, a percentage counter and a stage list) that
   fades out once the interface is up; the window itself slides into place.

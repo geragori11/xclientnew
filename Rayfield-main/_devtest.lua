@@ -71,11 +71,48 @@ function Color3.fromHSV(h, s, v)
 	return Color3.new(r, g, b)
 end
 
+--  Enum.KeyCode in the engine is enumerable, case sensitive and raises for a
+--  name that is not a member; the library canonicalises key names against
+--  GetEnumItems, so the shim has to model all three.  A table that answers to
+--  every name would hide exactly the bugs the driver looks for.
+local KEYCODE_MEMBERS = {
+	"Unknown",
+	"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+	"N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+	"Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+	"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+	"Space", "Escape", "Return", "Backspace", "Tab", "CapsLock",
+	"LeftShift", "RightShift", "LeftControl", "RightControl", "LeftAlt", "RightAlt",
+	"Up", "Down", "Left", "Right",
+	"Insert", "Delete", "Home", "End", "PageUp", "PageDown",
+	"KeypadZero", "KeypadOne", "KeypadTwo", "KeypadThree", "KeypadFour",
+	"KeypadFive", "KeypadSix", "KeypadSeven", "KeypadEight", "KeypadNine",
+}
+local keyCodeMembers = {}
+for _, name in ipairs(KEYCODE_MEMBERS) do keyCodeMembers[name] = true end
+
 Enum = setmetatable({}, {
 	__index = function(store, category)
 		local items = {}
+		local restricted = category == "KeyCode"
 		local cat = setmetatable({}, {
 			__index = function(_, item)
+				if item == "GetEnumItems" then
+					return function()
+						local list = {}
+						if not restricted then return list end
+						for index, name in ipairs(KEYCODE_MEMBERS) do
+							if items[name] == nil then
+								items[name] = setmetatable({ Name = name, EnumType = category }, { __typeof = "EnumItem" })
+							end
+							list[index] = items[name]
+						end
+						return list
+					end
+				end
+				if restricted and not keyCodeMembers[item] then
+					error(string.format("'%s' is not a valid member of Enum.KeyCode", tostring(item)))
+				end
 				if items[item] == nil then
 					items[item] = setmetatable({ Name = item, EnumType = category }, { __typeof = "EnumItem" })
 				end
@@ -228,7 +265,13 @@ function instanceMethods.ClearAllChildren(self)
 	rawset(self, "children", {})
 end
 
+--  Focus is tracked the way the engine does it: a TextBox that captures it
+--  owns the keyboard until it releases it, is destroyed, or is reported by
+--  UserInputService:GetFocusedTextBox()
+local focusedTextBox = nil
+
 function instanceMethods.Destroy(self)
+	if focusedTextBox == self then focusedTextBox = nil end
 	local parent = self.props.Parent
 	if parent and parent.RemoveChild then parent:RemoveChild(self) end
 	self.props.Parent = nil
@@ -247,8 +290,21 @@ function instanceMethods.GetPropertyChangedSignal(self, property)
 end
 function instanceMethods.SetAttribute(self) end
 function instanceMethods.GetAttribute(self) return nil end
-function instanceMethods.IsFocused(self) return false end
-function instanceMethods.ReleaseFocus(self) end
+
+--  TextBox focus ---------------------------------------------------------
+function instanceMethods.CaptureFocus(self)
+	focusedTextBox = self
+	self.Focused:Fire()
+end
+
+function instanceMethods.IsFocused(self) return focusedTextBox == self end
+
+function instanceMethods.ReleaseFocus(self, submitted)
+	if focusedTextBox ~= self then return end
+	focusedTextBox = nil
+	self.FocusLost:Fire(submitted and true or false)
+end
+
 function instanceMethods.JumpTo(self) end
 function instanceMethods.WaitForChild(self, name) return self:FindFirstChild(name) end
 
@@ -456,6 +512,7 @@ local function service(name)
 		end
 	elseif name == "UserInputService" then
 		instance.props.GetMouseLocation = function() return Vector2.new(500, 300) end
+		instance.props.GetFocusedTextBox = function() return focusedTextBox end
 	elseif name == "HttpService" then
 		instance.props.JSONEncode = function(_, value) return jsonEncode(value) end
 		instance.props.JSONDecode = function(_, text) return jsonDecode(text) end
@@ -1200,6 +1257,119 @@ Window:HideSettings()
 XClient:SetOpenKey("K")
 check("open key restored", XClient:GetOpenKey() == "K")
 
+print("== 18b. keystrokes in text fields and old key spellings ==")
+--  The shim now models Enum.KeyCode the way the engine does: enumerable,
+--  case sensitive, and raising for a name that is not one of its members.
+check("Enum.KeyCode can be enumerated", realType(Enum.KeyCode:GetEnumItems()) == "table" and #Enum.KeyCode:GetEnumItems() > 20)
+check("Enum.KeyCode is case sensitive", pcall(function() return Enum.KeyCode["SPACE"] end) == false)
+check("members keep their casing", Enum.KeyCode.Space.Name == "Space" and Enum.KeyCode.RightShift.Name == "RightShift")
+
+--  Whatever casing a key was stored with, the canonical member name is what
+--  ends up in the bind.
+check("a lower case key resolves", XClient:SetOpenKey("space") == true and XClient:GetOpenKey() == "Space")
+check("the saved flag follows the canonical name", openKeyFlag.CurrentKeybind == "Space")
+pressKey("Space", false)
+check("the lower case bind hides the menu", XClient:IsVisible() == false)
+pressKey("Space", false)
+check("the lower case bind shows the menu", XClient:IsVisible() == true)
+
+--  The previous interface stored tostring(EnumItem) verbatim, so a file it
+--  wrote holds "Enum.KeyCode.Space"; loading one has to arm the bind instead
+--  of clearing it (an empty open key makes the menu impossible to reopen).
+writefile("XClient/Configurations/Space Save.rfld", '{"xclient_open_key":"Enum.KeyCode.Space"}')
+check("a save with the qualified spelling loads", XClient:LoadConfigurationAs("Space Save") == true)
+check("the qualified spelling is canonicalised", XClient:GetOpenKey() == "Space" and openKeyFlag.CurrentKeybind == "Space")
+pressKey("Space", false)
+check("the restored bind hides the menu", XClient:IsVisible() == false)
+pressKey("Space", false)
+check("the restored bind shows the menu", XClient:IsVisible() == true)
+
+writefile("XClient/Configurations/Upper Save.rfld", '{"xclient_open_key":"ENUM.KEYCODE.SPACE"}')
+check("a save with the upper case spelling loads", XClient:LoadConfigurationAs("Upper Save") == true)
+check("the upper case spelling keeps the bind", XClient:GetOpenKey() == "Space")
+
+--  A value this build cannot read must never throw the live bind away.
+check("an unreadable key is refused", XClient:SetOpenKey("NotAKey") == false and XClient:GetOpenKey() == "Space")
+openKeyFlag:Set("ENUM.KEYCODE.NOTAREALKEY")
+check("an unreadable saved value keeps the bind", XClient:GetOpenKey() == "Space" and openKeyFlag.CurrentKeybind == "Space")
+openKeyFlag:Set("")
+check("an empty value still means no key bound", XClient:GetOpenKey() == "" and openKeyFlag.CurrentKeybind == "")
+XClient:SetOpenKey("K")
+check("the open key is back", XClient:GetOpenKey() == "K")
+
+--  While a text field owns the keyboard the menu must keep its hands off it:
+--  typing the name of a configuration reaches the field, nothing else.
+Window:ShowSettings()
+local focusBody = root:FindFirstChild("SettingsFlyout"):FindFirstChild("Body")
+local focusRow = focusBody and focusBody:FindFirstChild("Config file name")
+local focusBox = focusRow and focusRow:FindFirstChild("InputBox")
+check("the config name field exists", focusBox ~= nil)
+XClient:SetOpenKey("Space")
+focusBox:CaptureFocus()
+check("the field owns the keyboard", focusBox:IsFocused() == true and UserInputService:GetFocusedTextBox() == focusBox)
+pressKey("Space", false)
+check("typing a space does not toggle the menu", XClient:IsVisible() == true and focusBox:IsFocused() == true)
+local beforeTyping = spaceFires
+pressKey("RightShift", false)
+check("typing does not fire a keybind", spaceFires == beforeTyping)
+focusBox:ReleaseFocus(true)
+check("the keyboard is handed back", focusBox:IsFocused() == false and UserInputService:GetFocusedTextBox() == nil)
+pressKey("RightShift", false)
+check("the keybind fires again", spaceFires == beforeTyping + 1)
+pressKey("Space", false)
+check("the open key hides the menu again", XClient:IsVisible() == false)
+drainDeferred()
+
+--  Hiding the interface - or closing the panel the field lives in - has to
+--  hand the keyboard back, an invisible box would swallow every keystroke.
+XClient:SetVisibility(true)
+focusBox:CaptureFocus()
+XClient:SetVisibility(false)
+check("hiding the menu releases the field", focusBox:IsFocused() == false)
+pressKey("Space", false)
+check("the open key still toggles", XClient:IsVisible() == true)
+
+Window:ShowSettings()
+local closeBody = root:FindFirstChild("SettingsFlyout"):FindFirstChild("Body")
+local closeRow = closeBody and closeBody:FindFirstChild("Config file name")
+local closeBox = closeRow and closeRow:FindFirstChild("InputBox")
+closeBox:CaptureFocus()
+Window:HideSettings()
+check("closing the panel releases the field", closeBox:IsFocused() == false)
+drainDeferred()
+
+--  Save / Load act on the name that is on screen, even when the field never
+--  loses the focus (a click on a button does not always take it away).
+Window:ShowSettings()
+local liveBody = root:FindFirstChild("SettingsFlyout"):FindFirstChild("Body")
+local liveBox = liveBody:FindFirstChild("Config file name"):FindFirstChild("InputBox")
+liveBox.Text = "Live Name"
+liveBody:FindFirstChild("Save configuration"):FindFirstChild("Interact").MouseButton1Click:Fire()
+check("save uses the name that is on screen", isfile("XClient/Configurations/Live Name.rfld"))
+liveBody:FindFirstChild("Delete configuration"):FindFirstChild("Interact").MouseButton1Click:Fire()
+check("the live name can be deleted again", isfile("XClient/Configurations/Live Name.rfld") == false)
+Window:HideSettings()
+drainDeferred()
+
+--  LiveUpdate: the callback also hears every keystroke, while a programmatic
+--  :Set() still fires it exactly once.
+local liveFires = 0
+local LiveInput = Main:CreateInput({
+	Name = "Live input",
+	CurrentValue = "",
+	LiveUpdate = true,
+	Callback = function() liveFires = liveFires + 1 end,
+})
+local liveInputBox = LiveInput.Base.row:FindFirstChild("InputBox")
+liveInputBox.Text = "typed"
+check("LiveUpdate hears the keystrokes", liveFires == 1 and LiveInput.CurrentValue == "typed")
+LiveInput:Set("programmatic")
+check("Set still fires the callback once", liveFires == 2 and LiveInput.CurrentValue == "programmatic")
+
+XClient:SetOpenKey("K")
+XClient:SetVisibility(true)
+check("state restored for the rest of the run", XClient:GetOpenKey() == "K" and XClient:IsVisible() == true)
+
 print("== 19. PlayerWidget ==")
 --  the mock hands out fresh Color3 tables, so colours are compared field wise
 local function sameColor(a, b)
@@ -1684,7 +1854,12 @@ local remoteSha = "sha-aaaa"
 game.HttpGet = function(_, url)
 	if string.find(url, "api.github.com", 1, true) then
 		apiCalls = apiCalls + 1
-		return "[ { \"sha\": \"" .. remoteSha .. "\" } ]"
+		--  The reply has to look like the real one: requestHTTP() ignores
+		--  bodies of 50 bytes or less, and the loader reads the newest commit
+		--  hash from the first entry.
+		return string.format(
+			'[{"sha":"%s","node_id":"C_kwDOJ0000000000000000000","html_url":"https://github.com/dev/XClient/commit/%s"}]',
+			remoteSha, remoteSha)
 	end
 	rawCalls = rawCalls + 1
 	return librarySource

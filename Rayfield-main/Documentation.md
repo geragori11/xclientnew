@@ -166,11 +166,17 @@ Tab:CreateInput({
 	CurrentValue = "",
 	PlaceholderText = "https://...",         -- alias: Placeholder
 	RemoveTextAfterFocusLost = false,        -- alias: RemoveTextOnLeave
+	LiveUpdate = false,                      -- true: Callback also fires per keystroke
 	Flag = "webhook",
 	Callback = function(text) end,           -- fired when the box loses focus
 })
 -- returned: .CurrentValue, :Set(text), :SetSilent(text)
 ```
+
+`LiveUpdate` hands every keystroke to `Callback` instead of waiting for the focus
+to leave the box (the configuration name field in the settings panel uses it, so
+Save / Load always act on the name that is on screen). Nothing is written to disk
+per keystroke — the configuration is still saved when the focus leaves.
 
 ### CreateKeybind
 ```lua
@@ -507,6 +513,23 @@ restores the default.
 
 The bind is stored in the configuration under the flag `xclient_open_key`, so it
 survives `SaveConfiguration()` / `LoadConfiguration()` like any other element.
+
+Key names are canonicalised against `Enum.KeyCode`, which is case sensitive:
+whatever you pass — `"K"`, `"space"`, `"SPACE"`, `"RightShift"` or
+`Enum.KeyCode.Space` — becomes the member name the Enum really uses (`"Space"`,
+`"RightShift"`), and that is what `GetOpenKey()` returns and what the
+configuration holds. Saves written by the previous interface are read back the
+same way: it stored `tostring(Enum.KeyCode.Space)`, i.e. `"Enum.KeyCode.Space"`,
+and upper cased every name (`"SPACE"`), so an old `xclient_open_key` still arms
+the bind after loading instead of clearing it. A stored value that is not a key
+at all is ignored and the bind that is in force stays — only `""` (or
+`Enum.KeyCode.Unknown`) really means "no key bound".
+
+Keystrokes that belong to a text field are never shortcuts: while the
+configuration name field or the topbar search box owns the keyboard, the open key
+reaches the field instead of toggling the interface and keybind callbacks stay
+quiet. Hiding the menu or closing the settings panel releases the field, so the
+open key keeps working straight away.
 
 ---
 
