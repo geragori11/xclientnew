@@ -28,35 +28,25 @@
 =========================================================================]]
 
 local Loader = {}
-Loader.Version = "1.0.0"
+Loader.Version = "1.0.1"
 
 --=========================================================================
 --  1. CONFIGURATION
 --=========================================================================
 
 Loader.Config = {
-    --  Repository that hosts the library (edit these three to your own fork).
     User   = "geragori11",
     Repo   = "xclientnew",
     Branch = "main",
     File   = "Rayfield-main/xclient.lua",
 
-    --  Optional tiny marker published next to the library, e.g. "v1.2.0" or a
-    --  short hash.  When set it is used for the version check (~40 bytes)
-    --  instead of the GitHub API.  Leave it nil to ask the GitHub API for the
-    --  hash of the latest commit that touched File - that stays correct on its
-    --  own, without bumping anything by hand.
-    --      e.g. "https://raw.githubusercontent.com/<user>/<repo>/<branch>/version.txt"
     VersionURL = nil,
 
-    --  Cache location - a single folder inside the executor's workspace.
     Folder     = "XClient",
-    CacheFile  = "xclient.lua",   -- the saved library (read back with readfile)
-    MarkerFile = ".version",      -- the last seen remote version / hash
+    CacheFile  = "xclient.lua",
+    MarkerFile = ".version",
 
-    --  Cache = false -> always re-download (handy while editing the library).
     Cache   = true,
-    --  Offline = true -> never touch the network, use the cached copy only.
     Offline = false,
 }
 
@@ -77,10 +67,12 @@ local function withOptions(options)
     return cfg
 end
 
-local function rawURL(cfg)
-    return string.format(
-       "https://raw.githubusercontent.com/%s/%s/%s/%s",
-       cfg.User, cfg.Repo, cfg.Branch, cfg.File)
+local function candidateURLs(cfg)
+    return {
+       string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
+       string.format("https://raw.githack.com/%s/%s/%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
+       string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
+    }
 end
 
 local function cachePath(cfg)
@@ -91,8 +83,6 @@ local function markerPath(cfg)
     return cfg.Folder .. "/" .. cfg.MarkerFile
 end
 
---  The functions every executor that supports file IO exposes.  When they are
---  missing the loader still works, it just cannot cache between runs.
 local function filesystemAvailable()
     return type(writefile) == "function"
        and type(readfile) == "function"
@@ -113,23 +103,44 @@ local function ensureFolder(path)
     end
 end
 
---  GET wrapped in a pcall.  The second argument asks the executor to bypass its
---  own HTTP cache so a fresh version marker really is fresh; clients whose
---  HttpGet takes a single argument are retried without it.
-local function httpGet(url)
+local function requestHTTP(url)
     if type(url) ~= "string" or url == "" or type(game) ~= "table" then return nil end
     if type(game.HttpGet) ~= "function" then return nil end
+
     local ok, body = pcall(function()
        return game:HttpGet(url, true)
     end)
-    if ok and type(body) == "string" and body ~= "" then
+    if ok and type(body) == "string" and body ~= "" and not string.find(body, "404: Not Found") then
        return body
     end
+
     ok, body = pcall(function()
        return game:HttpGet(url)
     end)
-    if ok and type(body) == "string" and body ~= "" then
+    if ok and type(body) == "string" and body ~= "" and not string.find(body, "404: Not Found") then
        return body
+    end
+
+    return nil
+end
+
+local function httpGetWithRetries(url, attempts)
+    attempts = attempts or 3
+    for i = 1, attempts do
+       local res = requestHTTP(url)
+       if res then return res end
+       if i < attempts then task.wait(0.5) end
+    end
+    return nil
+end
+
+local function downloadFile(cfg)
+    local urls = candidateURLs(cfg)
+    for _, url in ipairs(urls) do
+       local body = httpGetWithRetries(url, 2)
+       if body and #body > 50 then
+          return body
+       end
     end
     return nil
 end
@@ -144,7 +155,7 @@ local function getHttpService()
 end
 
 --=========================================================================
---  3. VERSION RESOLUTION (the short request)
+--  3. VERSION RESOLUTION
 --=========================================================================
 
 local function normalizeVersion(text)
@@ -154,22 +165,18 @@ local function normalizeVersion(text)
     return text
 end
 
---  A tiny companion file, when the fork publishes one.
 local function fetchMarkerVersion(cfg)
     if not cfg.VersionURL then return nil end
-    return normalizeVersion(httpGet(cfg.VersionURL))
+    return normalizeVersion(httpGetWithRetries(cfg.VersionURL, 2))
 end
 
---  Fallback: the hash of the latest commit that touched the library file.  It
---  changes on its own every time xclient.lua is pushed, so there is nothing to
---  keep in sync by hand.
 local function fetchApiVersion(cfg)
     local HttpService = getHttpService()
     if not HttpService then return nil end
     local url = string.format(
        "https://api.github.com/repos/%s/%s/commits?path=%s&sha=%s&per_page=1",
        cfg.User, cfg.Repo, cfg.File, cfg.Branch)
-    local body = httpGet(url)
+    local body = requestHTTP(url)
     if not body then return nil end
     local ok, data = pcall(function()
        return HttpService:JSONDecode(body)
@@ -236,11 +243,9 @@ local function runSource(source, label)
     return result
 end
 
---  Downloads the library once, runs it and returns whatever it returned.  Does
---  not consult the cache - Load() uses it to refresh a damaged copy.
 function Loader:Fetch(options)
     local cfg = withOptions(options)
-    local source = httpGet(rawURL(cfg))
+    local source = downloadFile(cfg)
     if type(source) ~= "string" then return nil, "the repository is unreachable" end
     if cfg.Cache then
        writeCache(cfg, source)
@@ -253,45 +258,34 @@ function Loader:Fetch(options)
     return library
 end
 
---  The main entry point.  Returns the library table (the same value xclient.lua
---  returns) or raises an error when neither the cache nor the repository could
---  provide a working copy.
 function Loader:Load(options)
     local cfg = withOptions(options)
 
     local cachedSource  = cfg.Cache and readCache(cfg) or nil
     local cachedVersion = readMarker(cfg)
 
-    --  One short request decides everything (unless we were told to stay offline).
-    local remoteVersion
+    local remoteVersion = nil
     if not cfg.Offline then
        remoteVersion = resolveRemoteVersion(cfg)
     end
 
-    --  The cached copy wins when it exists and we already have the newest
-    --  version, could not reach the repository, or were asked to stay offline.
     local upToDate = cachedSource ~= nil
-       and (cfg.Offline or remoteVersion == nil or remoteVersion == cachedVersion)
+       and (cfg.Offline or (remoteVersion ~= nil and remoteVersion == cachedVersion))
 
     local usedCache = false
-    local source
+    local source = nil
 
     if upToDate then
        source = cachedSource
        usedCache = true
-       --  Heal a missing / stale marker we just learned the right value for.
-       if remoteVersion and remoteVersion ~= cachedVersion then
-          writeMarker(cfg, remoteVersion)
-       end
     else
-       source = httpGet(rawURL(cfg))
+       source = downloadFile(cfg)
        if source then
           if cfg.Cache then
              writeCache(cfg, source)
              if remoteVersion then writeMarker(cfg, remoteVersion) end
           end
        elseif cachedSource then
-          --  Download failed but an older copy is still there: keep working.
           source = cachedSource
           usedCache = true
        end
@@ -303,8 +297,7 @@ function Loader:Load(options)
 
     local library, loadError = runSource(source, cfg.File)
     if not library and usedCache then
-       --  The cached file is damaged: try one fresh download before giving up.
-       local fresh = httpGet(rawURL(cfg))
+       local fresh = downloadFile(cfg)
        if fresh then
           if cfg.Cache then
              writeCache(cfg, fresh)
@@ -324,16 +317,13 @@ function Loader:Load(options)
 end
 
 --=========================================================================
---  6. PUBLIC UTILITIES (optional)
+--  6. PUBLIC UTILITIES
 --=========================================================================
 
---  The version currently stored in the cache, or nil when there is none.
 function Loader:GetVersion(options)
     return readMarker(withOptions(options))
 end
 
---  Asks the repository for the newest version and reports whether it differs
---  from the cached one:  remoteVersion, hasUpdate
 function Loader:CheckForUpdate(options)
     local cfg = withOptions(options)
     local localVersion = readMarker(cfg)
@@ -341,10 +331,9 @@ function Loader:CheckForUpdate(options)
     return remoteVersion, (remoteVersion ~= nil and remoteVersion ~= localVersion)
 end
 
---  Forces a re-download of the library into the cache (does not run it).
 function Loader:Update(options)
     local cfg = withOptions(options)
-    local source = httpGet(rawURL(cfg))
+    local source = downloadFile(cfg)
     if type(source) ~= "string" then return false end
     local ok = writeCache(cfg, source)
     local remoteVersion = resolveRemoteVersion(cfg)
@@ -352,7 +341,6 @@ function Loader:Update(options)
     return ok and true or false
 end
 
---  Removes the cached library and its version marker.
 function Loader:ClearCache(options)
     local cfg = withOptions(options)
     if type(delfile) ~= "function" or type(isfile) ~= "function" then return false end
@@ -367,9 +355,6 @@ end
 
 --=========================================================================
 --  7. AUTO-RUN
---  Runs exactly like the one-shot HttpGet line it replaces.  Callers that want
---  to override the configuration without editing this file can set
---  getgenv().XClientLoaderOptions = { ... } before loading it.
 --=========================================================================
 
 local autoOptions
