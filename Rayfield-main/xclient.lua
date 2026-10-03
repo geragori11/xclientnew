@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.0.0"
+XClient.Version = "1.6.0"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.0.5"
+XClient.Build = "1.6."0
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
