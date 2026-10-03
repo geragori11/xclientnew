@@ -1,0 +1,175 @@
+    -- Создание вкладки в Rayfield UI
+    local PlayerTab = Window:CreateTab("Player", 4483362458)
+
+    -- ==========================================
+    -- РАЗДЕЛ: ХАРАКТЕРИСТИКИ
+    -- ==========================================
+    PlayerTab:CreateSection("Характеристики персонажа")
+
+    PlayerTab:CreateSlider({
+        Name = "Скорость бега (WalkSpeed)",
+        Range = {16, 500},
+        Increment = 1,
+        Suffix = " Скорость",
+        CurrentValue = 16,
+        Flag = "WalkSpeedSlider",
+        Callback = function(Value)
+            SavedWalkSpeed = Value
+            local Character = LocalPlayer.Character
+            local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+            if Humanoid and not MM2BypassEnabled then 
+                Humanoid.WalkSpeed = Value 
+            end
+        end,
+        Settings = {
+            "Обход ограничения ММ2",
+            {
+                Type = "Toggle",
+                Name = "Обход ММ2 (Для скорости > 30)",
+                CurrentValue = false,
+                Flag = "MM2BypassToggle",
+                Callback = function(Value)
+                    MM2BypassEnabled = Value
+                    local Character = LocalPlayer.Character
+                    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+                    if Humanoid then
+                        if Value and SavedWalkSpeed > 30 then
+                            Humanoid.WalkSpeed = 30
+                        else
+                            Humanoid.WalkSpeed = SavedWalkSpeed
+                        end
+                    end
+                end
+            }
+        }
+    })
+
+    PlayerTab:CreateSlider({
+        Name = "Высота прыжка (JumpPower)",
+        Range = {50, 500},
+        Increment = 1,
+        Suffix = " Сила",
+        CurrentValue = 50,
+        Flag = "JumpPowerSlider",
+        Callback = function(Value)
+            SavedJumpPower = Value
+            local Character = LocalPlayer.Character
+            local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+            if Humanoid then 
+                Humanoid.UseJumpPower = true
+                Humanoid.JumpPower = Value 
+            end
+        end
+    })
+
+    -- ==========================================
+    -- РАЗДЕЛ: ПЕРЕМЕЩЕНИЕ И СТЕНЫ
+    -- ==========================================
+    PlayerTab:CreateSection("Перемещение и Стены")
+
+    FlyGuiToggleRef = PlayerTab:CreateToggle({
+        Name = "Fly GUI V3 (Экранная панель полета)",
+        CurrentValue = false,
+        Flag = "FlyGuiV3Toggle",
+        Callback = function(Value)
+            main.Enabled = Value
+            if Value then
+                if not FlyGuiNotified then
+                    FlyGuiNotified = true
+                    pcall(function()
+                        game:GetService("StarterGui"):SetCore("SendNotification", {
+                            Title = "FLY GUI V3",
+                            Text = "BY XNEO",
+                            Icon = "rbxthumb://type=Asset&id=5107182114&w=150&h=150",
+                            Duration = 5
+                        })
+                    end)
+                end
+            else
+                disableFlyFlight()
+            end
+        end
+    })
+
+    PlayerTab:CreateToggle({
+        Name = "Прохождение сквозь стены (Noclip)",
+        CurrentValue = false,
+        Flag = "NoclipToggle",
+        Callback = function(Value)
+            NoclipEnabled = Value
+        end
+    })
+
+    PlayerTab:CreateToggle({
+        Name = "Бесконечный прыжок (Inf Jump)",
+        CurrentValue = false,
+        Flag = "InfJumpToggle",
+        Callback = function(Value)
+            InfJumpEnabled = Value
+        end
+    })
+
+    PlayerTab:CreateToggle({
+        Name = "Strafe (Убирает инерцию в воздухе)",
+        CurrentValue = false,
+        Flag = "StrafeToggle",
+        Callback = function(Value)
+            StrafeEnabled = Value
+        end
+    })
+
+    -- ==========================================
+    -- РАЗДЕЛ: ЗАЩИТА
+    -- ==========================================
+    PlayerTab:CreateSection("Защита")
+
+    PlayerTab:CreateToggle({
+        Name = "Anti-Fling (Без коллизии с игроками <30 ст)",
+        CurrentValue = false,
+        Flag = "AntiFlingToggle",
+        Callback = function(Value)
+            AntiFlingEnabled = Value
+        end
+    })
+
+    -- ==========================================
+    -- РАЗДЕЛ: ФАН УТИЛИТЫ (СПИНБОТ)
+    -- ==========================================
+    PlayerTab:CreateSection("Фан утилиты")
+
+    PlayerTab:CreateToggle({
+        Name = "Включить Спинбот (SpinBot)",
+        CurrentValue = false,
+        Flag = "SpinBotToggle",
+        Callback = function(Value)
+            SpinBotActive = Value
+        end,
+        Settings = {
+            "Настройки вращения",
+            {
+                Type = "Dropdown",
+                Name = "Режим Спинбота",
+                Options = {"Классический", "Физический (Плавный)", "Jitter", "Безумный", "Дерганье 6 оси", "Дерганье 3 оси"},
+                CurrentOption = "Классический",
+                Flag = "SpinModeDropdown",
+                Callback = function(Option)
+                    local CleanOption = type(Option) == "table" and Option[1] or Option
+                    if type(CleanOption) == "string" then
+                        CurrentSpinMode = CleanOption
+                    end
+                end
+            },
+            {
+                Type = "Slider",
+                Name = "Скорость вращения спинбота",
+                Range = {10, 300},
+                Increment = 5,
+                Suffix = " Скорость",
+                CurrentValue = 50,
+                Flag = "SpinSpeedSlider",
+                Callback = function(Value) 
+                    SpinSpeed = Value 
+                end
+            }
+        }
+    })
