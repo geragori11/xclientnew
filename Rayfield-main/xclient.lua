@@ -289,6 +289,26 @@ local function round(n)
 	return math.floor(n + 0.5)
 end
 
+--  Element builders hand their global input handlers to the interface through
+--  ctx.connections so XClient:Destroy() can drop them.  A few of them live
+--  only for the duration of a drag (the colour picker) and disconnect
+--  themselves as soon as the button comes up - those should also take their
+--  entry back out of the list, otherwise every single drag would leave a dead
+--  closure (and the widgets it captured) behind for the rest of the session.
+local function trackConnection(ctx, connection)
+	ctx.connections[#ctx.connections + 1] = connection
+	return connection
+end
+
+local function untrackConnection(ctx, connection)
+	local list = ctx.connections
+	for index = #list, 1, -1 do
+		if list[index] == connection then
+			table.remove(list, index)
+		end
+	end
+end
+
 --=========================================================================
 --  3. THEMES
 --=========================================================================
@@ -2274,14 +2294,17 @@ function builders.ColorPicker(container, ctx, opts)
 			end)
 			ended = UserInputService.InputEnded:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					--  the drag is over: stop listening and forget the handlers
+					untrackConnection(ctx, moved)
+					untrackConnection(ctx, ended)
 					moved:Disconnect()
 					ended:Disconnect()
 					callSafe(opts.Callback, color)
 					ctx.saveConfiguration()
 				end
 			end)
-			ctx.connections[#ctx.connections + 1] = moved
-			ctx.connections[#ctx.connections + 1] = ended
+			trackConnection(ctx, moved)
+			trackConnection(ctx, ended)
 		end
 
 		sv.InputBegan:Connect(function(input)
@@ -4953,6 +4976,9 @@ function XClient:CreateWindow(settings)
 		root = root,
 		flags = {},
 		connections = {},
+		--  connections created while the settings flyout is populated live
+		--  here, so the whole panel can be rebuilt without leaking them
+		flyoutConnections = {},
 		popup = nil,
 		theme = function() return currentTheme end,
 		saveConfiguration = function() requestAutoSave() end,
@@ -5029,10 +5055,30 @@ function XClient:CreateWindow(settings)
 	local flyoutOpen = false
 	local settingsTarget
 
+	--  Rows inside the flyout are torn down and rebuilt every time the panel
+	--  is opened.  The element builders register global input connections
+	--  while they run (slider / keybind / colour picker drag handlers).  Those
+	--  used to be appended to the window wide list and never removed, so
+	--  every mouse move walked an ever growing list and every destroyed row
+	--  stayed referenced in the process.  While the flyout is populated the
+	--  builders file their connections into this private bucket instead; the
+	--  previous bucket is dropped as soon as the panel is rebuilt or closed.
+	local function releaseFlyoutConnections()
+		local bucket = ctx.flyoutConnections
+		for index = #bucket, 1, -1 do
+			local connection = bucket[index]
+			bucket[index] = nil
+			pcall(function() connection:Disconnect() end)
+		end
+	end
+
 	local function closeFlyout()
 		if not flyoutOpen then return end
 		flyoutOpen = false
 		settingsTarget = nil
+		--  the rows inside are hidden with the panel, so stop listening for the
+		--  input they were handling; their content is rebuilt on the next open
+		releaseFlyoutConnections()
 		--  Any dropdown / colour picker opened inside the flyout must go too.
 		ctx.closePopup()
 		--  The configuration name field lives in here: closing the panel has
@@ -5048,6 +5094,9 @@ function XClient:CreateWindow(settings)
 	end
 
 	local function openFlyout(heading, populate)
+		--  the rows about to be thrown away registered input connections of
+		--  their own - drop those before building the replacements
+		releaseFlyoutConnections()
 		flyoutBody:ClearAllChildren()
 		ctx.closePopup()
 		addList(flyoutBody, { Padding = UDim.new(0, 6) })
@@ -5058,11 +5107,21 @@ function XClient:CreateWindow(settings)
 		flyoutOpen = true
 		tween(flyout, 0.2, { Position = UDim2.fromOffset(-(PANEL_WIDTH + PANEL_GAP - 4), 0) })
 		--  rows inside the flyout are much narrower than tab rows, so the
-		--  caption fitting is told about that smaller width while populating
+		--  caption fitting is told about that smaller width while populating.
+		--  While the rows are built their input connections are filed into the
+		--  flyout bucket (see releaseFlyoutConnections) so rebuilding the
+		--  panel can never pile them up on the window wide list.
 		local previousWidth = ctx.rowWidth
+		local previousConnections = ctx.connections
 		ctx.rowWidth = PANEL_WIDTH - 12
-		if populate then populate(flyoutBody) end
+		ctx.connections = ctx.flyoutConnections
+		--  populate is pcall'd so a broken row cannot leave the context
+		--  pointing at the flyout bucket / narrower width; the error is
+		--  re-raised afterwards to keep the old reporting behaviour
+		local ok, err = pcall(populate or function() end, flyoutBody)
+		ctx.connections = previousConnections
 		ctx.rowWidth = previousWidth
+		if not ok then error(err, 0) end
 	end
 
 	flyoutClose.MouseButton1Click:Connect(closeFlyout)
@@ -6467,6 +6526,13 @@ function XClient:Destroy()
 		for _, connection in ipairs(activeContext.connections) do
 			pcall(function() connection:Disconnect() end)
 		end
+		--  the settings flyout files the connections of its rows separately
+		if activeContext.flyoutConnections then
+			for _, connection in ipairs(activeContext.flyoutConnections) do
+				pcall(function() connection:Disconnect() end)
+			end
+		end
+
 	activeContext = nil
 	end
 	--  the focus watchers belong to the interface that just went away; the next

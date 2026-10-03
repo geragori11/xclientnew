@@ -542,6 +542,32 @@ game = {
 --  handy globals for the driver below
 UserInputService = service("UserInputService")
 
+--  Count the handlers registered on the engine input signals.  The per module
+--  settings flyout builds its rows from scratch on every open, so tracking
+--  these lets the driver prove the input handlers do not pile up.
+local uisConnections = 0
+do
+	local function track(signal)
+		local baseConnect = signal.Connect
+		signal.Connect = function(self, fn)
+			local connection = baseConnect(self, fn)
+			uisConnections = uisConnections + 1
+			local baseDisconnect = connection.Disconnect
+			connection.Disconnect = function(...)
+				if connection.Connected then
+					uisConnections = uisConnections - 1
+				end
+				return baseDisconnect(...)
+			end
+			return connection
+		end
+	end
+	track(UserInputService.InputBegan)
+	track(UserInputService.InputChanged)
+	track(UserInputService.InputEnded)
+end
+local function inputConnections() return uisConnections end
+
 local deferred = {}
 task = {
 	delay = function(_, callback) deferred[#deferred + 1] = callback end,
@@ -910,11 +936,14 @@ check("picker popup created", pickerPopup ~= nil)
 local sv = pickerPopup and pickerPopup:FindFirstChild("SaturationValue")
 check("saturation/value area", sv ~= nil)
 if sv then
+	local pickerHandlersBefore = inputConnections()
 	sv.InputBegan:Fire({
 		UserInputType = Enum.UserInputType.MouseButton1,
 		Position = Vector2.new(60, 10),
 	})
 	UserInputService.InputEnded:Fire({ UserInputType = Enum.UserInputType.MouseButton1 })
+	check("a finished colour drag gives its input handlers back",
+		inputConnections() == pickerHandlersBefore)
 end
 check("dragging the picker changed the colour", Picker.Color ~= nil)
 
@@ -970,6 +999,22 @@ check("nested setting is controllable", gearVisibleValue == false)
 WithSettings.Base.gearButton.MouseButton1Click:Fire()
 drainDeferred()
 check("clicking the gear again closes the flyout", flyout.Visible == false)
+
+--  The flyout rebuilds its rows every time it opens, so the input handlers the
+--  rows register (the nested Slider tracks the mouse through UserInputService)
+--  have to be released again.  Opening and closing the gear repeatedly must
+--  not leave handlers behind - that would make every mouse move walk a longer
+--  and longer list and keep the destroyed rows alive.
+local gearHandlersBefore = inputConnections()
+for _ = 1, 6 do
+	WithSettings.Base.gearButton.MouseButton1Click:Fire()
+	drainDeferred()
+	WithSettings.Base.gearButton.MouseButton1Click:Fire()
+	drainDeferred()
+end
+local gearHandlerGrowth = inputConnections() - gearHandlersBefore
+check("reopening the gear does not leak its input handlers (grew by " .. gearHandlerGrowth .. ")",
+	gearHandlerGrowth == 0)
 
 print("== 12. configuration system (same file layout as before) ==")
 local savedInputValue = Input.CurrentValue
