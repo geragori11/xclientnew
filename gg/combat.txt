@@ -1,9 +1,3 @@
--- =========================================================================
--- Murder Mystery 2: Auto-Shoot + Manual Shoot (R) + HvH Mode
--- + Murderer/Sheriff Exploits + Remote Kill Spoof + Silent Kill + Knife Aura
--- + Proxy Knife Throw (Бросок по мышке Ctrl+I, по видимым целям)
--- + Touch of Death / Проклятый игрок (смерть при приближении к игроку)
--- =========================================================================
 
 return function(Window)
     local Players = game:GetService("Players")
