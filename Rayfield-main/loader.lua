@@ -28,7 +28,7 @@
 =========================================================================]]
 
 local Loader = {}
-Loader.Version = "1.0.1"
+Loader.Version = "1.0.3"
 
 --=========================================================================
 --  1. CONFIGURATION
@@ -39,6 +39,8 @@ Loader.Config = {
     Repo   = "xclientnew",
     Branch = "main",
     File   = "Rayfield-main/xclient.lua",
+
+    DirectURL = "https://raw.githubusercontent.com/geragori11/xclientnew/refs/heads/main/Rayfield-main/xclient.lua",
 
     VersionURL = nil,
 
@@ -68,11 +70,23 @@ local function withOptions(options)
 end
 
 local function candidateURLs(cfg)
-    return {
-       string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
-       string.format("https://raw.githack.com/%s/%s/%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
-       string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", cfg.User, cfg.Repo, cfg.Branch, cfg.File),
-    }
+    local cleanBranch = tostring(cfg.Branch or "main"):gsub("^refs/heads/", "")
+    local cacheBust = tostring(os and os.time and os.time() or math.random(100000, 999999))
+    local list = {}
+
+    if cfg.DirectURL and cfg.DirectURL ~= "" then
+       list[#list + 1] = cfg.DirectURL
+       list[#list + 1] = cfg.DirectURL .. "?t=" .. cacheBust
+    end
+
+    list[#list + 1] = string.format("https://raw.githubusercontent.com/%s/%s/refs/heads/%s/%s", cfg.User, cfg.Repo, cleanBranch, cfg.File)
+    list[#list + 1] = string.format("https://raw.githubusercontent.com/%s/%s/refs/heads/%s/%s?t=%s", cfg.User, cfg.Repo, cleanBranch, cfg.File, cacheBust)
+    list[#list + 1] = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s", cfg.User, cfg.Repo, cleanBranch, cfg.File)
+    list[#list + 1] = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s?t=%s", cfg.User, cfg.Repo, cleanBranch, cfg.File, cacheBust)
+    list[#list + 1] = string.format("https://github.com/%s/%s/raw/refs/heads/%s/%s", cfg.User, cfg.Repo, cleanBranch, cfg.File)
+    list[#list + 1] = string.format("https://github.com/%s/%s/raw/%s/%s", cfg.User, cfg.Repo, cleanBranch, cfg.File)
+
+    return list
 end
 
 local function cachePath(cfg)
@@ -104,40 +118,42 @@ local function ensureFolder(path)
 end
 
 local function requestHTTP(url)
-    if type(url) ~= "string" or url == "" or type(game) ~= "table" then return nil end
-    if type(game.HttpGet) ~= "function" then return nil end
+    if type(url) ~= "string" or url == "" then return nil end
 
-    local ok, body = pcall(function()
-       return game:HttpGet(url, true)
-    end)
-    if ok and type(body) == "string" and body ~= "" and not string.find(body, "404: Not Found") then
-       return body
+    if type(game) == "table" and type(game.HttpGet) == "function" then
+       local ok, body = pcall(function()
+          return game:HttpGet(url)
+       end)
+       if ok and type(body) == "string" and #body > 50 and not body:find("404: Not Found") and not body:find("<!DOCTYPE html>") then
+          return body
+       end
+
+       ok, body = pcall(function()
+          return game:HttpGet(url, true)
+       end)
+       if ok and type(body) == "string" and #body > 50 and not body:find("404: Not Found") and not body:find("<!DOCTYPE html>") then
+          return body
+       end
     end
 
-    ok, body = pcall(function()
-       return game:HttpGet(url)
-    end)
-    if ok and type(body) == "string" and body ~= "" and not string.find(body, "404: Not Found") then
-       return body
+    local customReq = (syn and syn.request) or (http and http.request) or http_request or request
+    if type(customReq) == "function" then
+       local ok, res = pcall(customReq, {
+          Url = url,
+          Method = "GET"
+       })
+       if ok and type(res) == "table" and res.StatusCode == 200 and type(res.Body) == "string" and #res.Body > 50 then
+          return res.Body
+       end
     end
 
-    return nil
-end
-
-local function httpGetWithRetries(url, attempts)
-    attempts = attempts or 3
-    for i = 1, attempts do
-       local res = requestHTTP(url)
-       if res then return res end
-       if i < attempts then task.wait(0.5) end
-    end
     return nil
 end
 
 local function downloadFile(cfg)
     local urls = candidateURLs(cfg)
     for _, url in ipairs(urls) do
-       local body = httpGetWithRetries(url, 2)
+       local body = requestHTTP(url)
        if body and #body > 50 then
           return body
        end
@@ -167,15 +183,16 @@ end
 
 local function fetchMarkerVersion(cfg)
     if not cfg.VersionURL then return nil end
-    return normalizeVersion(httpGetWithRetries(cfg.VersionURL, 2))
+    return normalizeVersion(requestHTTP(cfg.VersionURL))
 end
 
 local function fetchApiVersion(cfg)
     local HttpService = getHttpService()
     if not HttpService then return nil end
+    local cleanBranch = tostring(cfg.Branch or "main"):gsub("^refs/heads/", "")
     local url = string.format(
        "https://api.github.com/repos/%s/%s/commits?path=%s&sha=%s&per_page=1",
-       cfg.User, cfg.Repo, cfg.File, cfg.Branch)
+       cfg.User, cfg.Repo, cfg.File, cleanBranch)
     local body = requestHTTP(url)
     if not body then return nil end
     local ok, data = pcall(function()
@@ -270,7 +287,7 @@ function Loader:Load(options)
     end
 
     local upToDate = cachedSource ~= nil
-       and (cfg.Offline or (remoteVersion ~= nil and remoteVersion == cachedVersion))
+       and (cfg.Offline or remoteVersion == nil or remoteVersion == cachedVersion)
 
     local usedCache = false
     local source = nil
@@ -278,12 +295,19 @@ function Loader:Load(options)
     if upToDate then
        source = cachedSource
        usedCache = true
+       if remoteVersion and remoteVersion ~= cachedVersion then
+          writeMarker(cfg, remoteVersion)
+       end
     else
        source = downloadFile(cfg)
        if source then
           if cfg.Cache then
              writeCache(cfg, source)
-             if remoteVersion then writeMarker(cfg, remoteVersion) end
+             if remoteVersion then
+                writeMarker(cfg, remoteVersion)
+             else
+                writeMarker(cfg, tostring(os and os.time and os.time() or "1"))
+             end
           end
        elseif cachedSource then
           source = cachedSource
