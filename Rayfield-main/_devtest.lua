@@ -1989,6 +1989,14 @@ local function testSearchBar()
 		and sliderTrack.Position.X.Offset + sliderTrack.Size.X.Offset <= readout.Position.X.Offset)
 	check("slider fill + knob ride on the track",
 		sliderTrack:FindFirstChild("Fill") ~= nil and sliderTrack:FindFirstChild("Knob") ~= nil)
+	--  the knob is 24px wide, so its leftmost pixel sits 12px out of the track;
+	--  that must stay right of the caption's reserved band, otherwise the read
+	--  out covers the label text (the "captions disappear behind the slider" bug)
+	local sliderCaption = Slider.Base.row:FindFirstChild("Title")
+	check("the slider knob stays clear of the caption",
+		sliderCaption ~= nil
+		and sliderTrack.Position.X.Offset - 12
+			>= sliderCaption.Position.X.Offset + sliderCaption.Size.X.Offset)
 
 	--  an open dropdown survives a poll Refresh instead of blinking
 	Dropdown.Base.row:FindFirstChild("Selector").MouseButton1Click:Fire()
@@ -2007,6 +2015,94 @@ local function testSearchBar()
 	Main:Select()
 end
 testSearchBar()
+
+--  ------------------------------------------------------- compact flyout
+--  Right clicking a module gear opens the compact, auto height panel; the
+--  left click keeps the full height flyout.  Its own function, like section
+--  26, to keep the chunk's local list within Lua 5.1's 200 local limit.
+local function compactSettingsFlyout()
+	print("== 27. compact module settings (right click the gear) ==")
+	local compactPanel = root:FindFirstChild("SettingsCompact")
+	check("the compact popup exists next to the full flyout", compactPanel ~= nil)
+	check("...and starts hidden", compactPanel and compactPanel.Visible == false)
+
+	--  a small module: the popup hugs its rows
+	WithSettings.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+	check("right click opens the compact popup", compactPanel.Visible == true)
+	check("...while the full flyout stays closed", flyout.Visible == false)
+	local compactBody = compactPanel:FindFirstChild("Body")
+	check("the compact popup is populated", compactBody ~= nil and compactBody:FindFirstChild("Heading") ~= nil)
+	check("its rows register their flags", XClient.Flags["gearDistance"] ~= nil)
+
+	--  the nested slider is the narrowest one in the interface: its track must
+	--  stay inside the row and its knob must not sit on top of the caption
+	local sliderRow = compactBody and compactBody:FindFirstChild("Distance")
+	local narrowTrack = sliderRow and sliderRow:FindFirstChild("Track")
+	local narrowValue = sliderRow and sliderRow:FindFirstChild("Value")
+	local narrowTitle = sliderRow and sliderRow:FindFirstChild("Title")
+	check("the compact slider track fits inside the row",
+		narrowTrack ~= nil and narrowValue ~= nil
+		and narrowTrack.Position.X.Offset + narrowTrack.Size.X.Offset <= narrowValue.Position.X.Offset)
+	check("...and its knob stays clear of the caption",
+		narrowTrack ~= nil and narrowTitle ~= nil
+		and narrowTrack.Position.X.Offset - 12
+			>= narrowTitle.Position.X.Offset + narrowTitle.Size.X.Offset)
+	check("it is auto height - shorter than the window",
+		compactPanel.Size.Y.Offset < root.Size.Y.Offset)
+	check("...but still fits its own title bar", compactPanel.Size.Y.Offset >= 96)
+
+	--  the same gear again closes it
+	WithSettings.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+	check("right clicking again closes the compact popup", compactPanel.Visible == false)
+
+	--  left click is unchanged: it still opens the full height panel
+	WithSettings.Base.gearButton.MouseButton1Click:Fire()
+	drainDeferred()
+	check("left click still opens the full flyout", flyout.Visible == true)
+	check("...and leaves the compact popup closed", compactPanel.Visible == false)
+
+	--  the compact mode takes over from the full flyout
+	WithSettings.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+	check("the compact mode replaces the full flyout",
+		compactPanel.Visible == true and flyout.Visible == false)
+	WithSettings.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+
+	--  a module with many rows: it stops growing at the cap and scrolls
+	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+	check("a long module is capped instead of growing forever",
+		compactPanel.Visible == true and compactPanel.Size.Y.Offset <= 300)
+	local tallBody = compactPanel:FindFirstChild("Body")
+	check("its rows are all built", tallBody ~= nil and tallBody:FindFirstChild("Load") ~= nil)
+	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+
+	--  the compact rows must not leak their input handlers
+	local before = inputConnections()
+	for _ = 1, 6 do
+		SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+		drainDeferred()
+		SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+		drainDeferred()
+	end
+	check("reopening the compact popup leaks no input handler (grew by "
+		.. (inputConnections() - before) .. ")", inputConnections() == before)
+
+	--  the compact popup also gives way when the full panel is asked for
+	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+	drainDeferred()
+	Window:ShowSettings()
+	drainDeferred()
+	check("the topbar panel dismisses the compact popup", compactPanel.Visible == false)
+	Window:HideSettings()
+	drainDeferred()
+	Main:Select()
+end
+compactSettingsFlyout()
 
 print("== 23. the loading animation cleans itself up ==")
 for _ = 1, 30 do drainDeferred() end

@@ -43,8 +43,10 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   fills while a shimmer sweeps it, a percentage counter and a stage list) that
   fades out once the interface is up; the window itself slides into place.
 * **Per module gear** — give a row a `Settings = { ... }` table and a gear icon
-  appears; pressing it slides a settings flyout in from the **left** of the
-  window, built from the same element builders and saved like any other flag.
+  appears; **left click** slides the full height settings flyout in from the
+  **left** of the window, **right click** opens a compact auto-height popup in
+  the same spot (it hugs its rows and scrolls once they no longer fit). Both are
+  built from the same element builders and saved like any other flag.
 * **Built-in configuration system** — **auto-save is on by default** (a running
   `autocfg` file is created and reloaded on the next join), plus
   save / load / delete / list named configurations and autoload on start, in the

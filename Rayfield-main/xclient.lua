@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.5.0"
+XClient.Version = "1.0.0"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.5.0"
+XClient.Build = "1.0.5"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -857,6 +857,10 @@ local function newRow(container, ctx, opts)
 		gearButton.MouseButton1Click:Connect(function()
 			if ctx.toggleSettings then ctx.toggleSettings(base) end
 		end)
+		--  Right click opens the compact, auto height panel instead.
+		gearButton.MouseButton2Click:Connect(function()
+			if ctx.toggleCompactSettings then ctx.toggleCompactSettings(base) end
+		end)
 	end
 
 	fitRowText(base, base.rowWidth)
@@ -1037,7 +1041,29 @@ function builders.Slider(container, ctx, opts)
 	local suffix = opts.Suffix or ""
 	local value = math.clamp(opts.CurrentValue or min, min, max)
 
-	local width = opts.Width or 160
+	--  Slider geometry.  The knob is 24px wide, so it pokes 12px out of the
+	--  track at both ends; that bleed has to stay clear of the caption on the
+	--  left and of the value read-out on the right, otherwise the knob (and
+	--  the fill behind it) lands on top of the label text - the "the caption
+	--  is hidden behind the slider" report.
+	local SLIDER_KNOB_W = 24
+	local SLIDER_KNOB_R = SLIDER_KNOB_W / 2
+	local SLIDER_VALUE_W = 46
+	--  gap >= knob radius keeps the knob clear of the value box
+	local SLIDER_VALUE_GAP = 14
+	local SLIDER_MIN_TRACK = 28
+	local SLIDER_MIN_CAPTION = 48        -- matches rowTextWidth's floor
+
+	--  The control is right aligned, so its width is capped by whatever the
+	--  caption (and the gear, when the row has one) leaves free.  Inside the
+	--  narrow settings panel the requested 160px does not fit, so the track is
+	--  shortened here instead of spilling over the caption.
+	local rowWidth = tonumber(ctx.rowWidth) or ROW_WIDTH
+	local rightOffset = base.hasGear and (GEAR_RIGHT + GEAR_BUTTON + 8) or CONTROL_RIGHT
+	local minControl = SLIDER_KNOB_R + SLIDER_MIN_TRACK + SLIDER_VALUE_GAP + SLIDER_VALUE_W
+	local maxControl = rowWidth - (base.titleX + rightOffset + SLIDER_MIN_CAPTION + 14)
+	local width = math.max(math.min(opts.Width or 160, maxControl), minControl)
+
 	local valueBox = newText({
 		Name = "Value",
 		Text = tostring(value) .. suffix,
@@ -1045,13 +1071,13 @@ function builders.Slider(container, ctx, opts)
 		Font = THEME_FONT_BOLD,
 		TextColor3 = theme.Accent,
 		TextXAlignment = Enum.TextXAlignment.Right,
-		Size = UDim2.fromOffset(46, 20),
+		Size = UDim2.fromOffset(SLIDER_VALUE_W, 20),
 		Parent = base.row,
 	})
 	valueBox.Position = UDim2.new(1, 0, 0.5, 0)
 	valueBox.AnchorPoint = Vector2.new(1, 0.5)
 
-	local trackWidth = width - 54
+	local trackWidth = width - SLIDER_KNOB_R - SLIDER_VALUE_GAP - SLIDER_VALUE_W
 	local track = create("TextButton", {
 		Name = "Track",
 		Text = "",
@@ -1086,19 +1112,18 @@ function builders.Slider(container, ctx, opts)
 	addStroke(knob, theme.Background, 2, 0)
 
 	-- position the slider control group (track + value box) at the right
-	local controlWidth = trackWidth + 54
+	local controlWidth = width
 	fitControl(base, controlWidth)
 	local rightEdge = -(base.controlRight)
 	--  The whole control group (track + value box) is right aligned: the value
 	--  box hugs the row's right edge and the track sits one control width to
-	--  its left.  The old expression used a POSITIVE offset (rightEdge + 54)
-	--  which pushed the track - and everything parented to it (fill + knob) -
-	--  completely off the right edge of the row, leaving only the "0%" read
-	--  out visible.  Keep the offset negative so the slider is on screen.
-	track.Position = UDim2.new(1, rightEdge - controlWidth, 0.5, 0)
+	--  its left.  The track is inset on the left by the knob radius so the
+	--  knob's leftmost pixel never reaches into the caption band fitControl
+	--  just reserved.  Keep the offset negative so the slider is on screen.
+	track.Position = UDim2.new(1, rightEdge - controlWidth + SLIDER_KNOB_R, 0.5, 0)
 	valueBox.Position = UDim2.new(1, rightEdge, 0.5, 0)
 	--  keep long values (decimals, suffixes, "Infinity") inside the value box
-	fitLabel(valueBox, 44, { MinSize = 9 })
+	fitLabel(valueBox, SLIDER_VALUE_W - 2, { MinSize = 9 })
 
 	--  Backwards compatible contract (see Toggle): the settings table handed in
 	--  by the caller IS the element that gets returned, so mySlider.CurrentValue,
@@ -5089,6 +5114,12 @@ local RAIL_WIDTH = 148
 local TOPBAR_HEIGHT = 36
 local PANEL_WIDTH = 210
 local PANEL_GAP = 8
+--  Compact settings popup.  Right clicking a module gear opens this instead
+--  of the full height flyout: it is narrower, hugs its rows and stops growing
+--  at COMPACT_MAX_HEIGHT (the body scrolls from there on).
+local COMPACT_WIDTH = 190
+local COMPACT_MAX_HEIGHT = 300
+local COMPACT_MIN_HEIGHT = 96
 
 local activeContext
 
@@ -5424,6 +5455,143 @@ function XClient:CreateWindow(settings)
 
 	flyoutClose.MouseButton1Click:Connect(closeFlyout)
 
+	--  Compact settings popup ------------------------------------------
+	--  Right clicking a module gear opens this instead of the full height
+	--  flyout: the same rows, but the panel hugs its content, stops growing at
+	--  COMPACT_MAX_HEIGHT and scrolls past that.  It sits in the same spot on
+	--  the left of the window.
+	local compact = newFrame({
+		Name = "SettingsCompact",
+		BackgroundColor3 = currentTheme.Surface,
+		Size = UDim2.fromOffset(COMPACT_WIDTH, COMPACT_MIN_HEIGHT),
+		Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0),
+		Visible = false,
+		Parent = root,
+	})
+	compact.ZIndex = 30
+	addCorner(compact, UDim.new(0, 10))
+	local compactStroke = addStroke(compact, currentTheme.Stroke, 1, 0.25)
+
+	local compactTitle = newText({
+		Name = "Title",
+		Text = "Settings",
+		Font = THEME_FONT_BOLD,
+		TextSize = 14,
+		TextColor3 = currentTheme.Text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.new(1, -24, 0, 20),
+		Position = UDim2.fromOffset(12, 14),
+		Parent = compact,
+	})
+	compactTitle.ZIndex = 31
+
+	local compactClose = create("TextButton", {
+		Name = "Close",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(20, 20),
+		Position = UDim2.new(1, -10, 0, 14),
+		AnchorPoint = Vector2.new(1, 0),
+		Parent = compact,
+	})
+	compactClose.ZIndex = 31
+	local compactBarA = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(10, 1.6), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Parent = compactClose })
+	local compactBarB = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(10, 1.6), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = -45, Parent = compactClose })
+	compactBarA.ZIndex = 32
+	compactBarB.ZIndex = 32
+
+	local compactBody = create("ScrollingFrame", {
+		Name = "Body",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, -12, 0, COMPACT_MIN_HEIGHT - (TOPBAR_HEIGHT + 14)),
+		Position = UDim2.fromOffset(6, TOPBAR_HEIGHT + 6),
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = currentTheme.Stroke,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(),
+		Parent = compact,
+	})
+	compactBody.ZIndex = 31
+	addList(compactBody, { Padding = UDim.new(0, 6) })
+
+	local compactOpen = false
+	local compactTarget
+
+	--  Classes that are GuiObjects.  Instance:IsA("GuiObject") answers this in
+	--  the engine; the dev harness shim compares class names exactly, so the
+	--  list keeps the measuring below working on both.
+	local COMPACT_GUI_CLASSES = {
+		Frame = true, TextLabel = true, TextButton = true, TextBox = true,
+		ImageLabel = true, ImageButton = true, ScrollingFrame = true,
+		CanvasGroup = true, ViewportFrame = true, VideoFrame = true,
+	}
+	local function compactIsGui(child)
+		local ok, result = pcall(function() return child:IsA("GuiObject") end)
+		if ok and result then return true end
+		return COMPACT_GUI_CLASSES[child.ClassName] == true
+	end
+
+	--  Sums the row heights the populator laid down (plus the list padding) so
+	--  the panel can be sized to fit them without waiting for a layout pass.
+	local function compactContentHeight(container)
+		local total, count = 0, 0
+		for _, child in ipairs(container:GetChildren()) do
+			if compactIsGui(child) then
+				local size = child.Size
+				total = total + (size and size.Y and size.Y.Offset or 0)
+				count = count + 1
+			end
+		end
+		return total + math.max(0, count - 1) * 6
+	end
+
+	local function closeCompact()
+		if not compactOpen then return end
+		compactOpen = false
+		compactTarget = nil
+		releaseFlyoutConnections()
+		ctx.closePopup()
+		releaseTextBoxFocus()
+		tween(compact, 0.16, { Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0) })
+		task.delay(0.18, function()
+			if not compactOpen and compact and compact.Parent then
+				compact.Visible = false
+			end
+		end)
+	end
+
+	local function openCompact(heading, populate)
+		releaseFlyoutConnections()
+		compactBody:ClearAllChildren()
+		ctx.closePopup()
+		addList(compactBody, { Padding = UDim.new(0, 6) })
+		compactTitle.Text = tostring(heading or "Settings")
+		fitLabel(compactTitle, COMPACT_WIDTH - 46, { MinSize = 10 })
+		local previousWidth = ctx.rowWidth
+		local previousConnections = ctx.connections
+		ctx.rowWidth = COMPACT_WIDTH - 12
+		ctx.connections = ctx.flyoutConnections
+		local ok, err = pcall(populate or function() end, compactBody)
+		ctx.connections = previousConnections
+		ctx.rowWidth = previousWidth
+		if not ok then error(err, 0) end
+		--  auto height: hug the rows, but never pass the cap - past it the
+		--  body keeps a fixed viewport and scrolls (AutomaticCanvasSize)
+		local bodyMin = COMPACT_MIN_HEIGHT - (TOPBAR_HEIGHT + 14)
+		local bodyMax = COMPACT_MAX_HEIGHT - (TOPBAR_HEIGHT + 14)
+		local bodyHeight = math.clamp(compactContentHeight(compactBody) + 6, bodyMin, bodyMax)
+		compactBody.Size = UDim2.new(1, -12, 0, bodyHeight)
+		compact.Size = UDim2.fromOffset(COMPACT_WIDTH, bodyHeight + TOPBAR_HEIGHT + 14)
+		compact.Visible = true
+		compact.Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0)
+		compactOpen = true
+		tween(compact, 0.2, { Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP - 4), 0) })
+	end
+
+	compactClose.MouseButton1Click:Connect(closeCompact)
+
 	--  Instantiate the per module settings of a row inside the flyout ----
 	local function buildModuleSettings(container, base)
 		local list = base.opts and base.opts.Settings
@@ -5458,14 +5626,30 @@ function XClient:CreateWindow(settings)
 			closeFlyout()
 			return
 		end
+		--  only one panel at a time: the compact popup gives way
+		closeCompact()
 		settingsTarget = base
 		openFlyout(base.opts and base.opts.Name or "Settings", function(container)
 			buildModuleSettings(container, base)
 		end)
 	end
 
+	--  Right click on a module gear: the compact, auto height panel.
+	ctx.toggleCompactSettings = function(base)
+		if compactTarget == base and compactOpen then
+			closeCompact()
+			return
+		end
+		--  the full height flyout gives way to the compact popup
+		closeFlyout()
+		compactTarget = base
+		openCompact(base.opts and base.opts.Name or "Settings", function(container)
+			buildModuleSettings(container, base)
+		end)
+	end
+
 	ctx.isSettingsOpen = function(base)
-		return flyoutOpen and settingsTarget == base
+		return (flyoutOpen and settingsTarget == base) or (compactOpen and compactTarget == base)
 	end
 
 	--  Global settings panel (topbar gear / configuration manager) --------
@@ -5758,6 +5942,8 @@ function XClient:CreateWindow(settings)
 	end
 
 	openGlobalSettings = function()
+		--  the topbar panel is the full height one; any compact popup gives way
+		closeCompact()
 		settingsTarget = nil
 		openFlyout("Settings", buildGlobalSettings)
 	end
@@ -5817,7 +6003,10 @@ function XClient:CreateWindow(settings)
 	local minimised = false
 	local function setMinimised(state)
 		minimised = state and true or false
-		if minimised then closeFlyout() end
+		if minimised then
+			closeFlyout()
+			closeCompact()
+		end
 		rail.Visible = not minimised
 		content.Visible = not minimised
 		flyout.Size = UDim2.fromOffset(PANEL_WIDTH, minimised and TOPBAR_HEIGHT or WINDOW_HEIGHT)
@@ -5870,6 +6059,7 @@ function XClient:CreateWindow(settings)
 			--  Popups live on the window, so dismiss any open one with it.
 			ctx.closePopup()
 			closeFlyout()
+			closeCompact()
 			--  A hidden interface must not keep the keyboard: the open key
 			--  would be typed into an invisible field instead of toggling the
 			--  menu back on.
@@ -6322,6 +6512,12 @@ function XClient:CreateWindow(settings)
 		flyoutBody.ScrollBarImageColor3 = theme.Stroke
 		closeBarA.BackgroundColor3 = theme.TextMuted
 		closeBarB.BackgroundColor3 = theme.TextMuted
+		compact.BackgroundColor3 = theme.Surface
+		compactStroke.Color = theme.Stroke
+		compactTitle.TextColor3 = theme.Text
+		compactBody.ScrollBarImageColor3 = theme.Stroke
+		compactBarA.BackgroundColor3 = theme.TextMuted
+		compactBarB.BackgroundColor3 = theme.TextMuted
 		for _, entry in ipairs(tabs) do
 			entry.page.ScrollBarImageColor3 = theme.Stroke
 			entry.button.BackgroundColor3 = entry.page.Visible and theme.Surface or theme.Rail
@@ -6639,7 +6835,10 @@ function XClient:CreateWindow(settings)
 	function Window:IsVisible() return visible end
 	function Window:Destroy() XClient:Destroy() end
 	function Window:ShowSettings() openGlobalSettings() end
-	function Window:HideSettings() closeFlyout() end
+	function Window:HideSettings()
+		closeFlyout()
+		closeCompact()
+	end
 
 	--  Deliberately defined with a dot: the previous examples call it as
 	--  Window.ModifyTheme("DarkBlue"), colon calls are tolerated as well.

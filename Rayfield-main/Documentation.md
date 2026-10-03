@@ -268,8 +268,16 @@ A Neverlose style card that holds other elements — see **section 18**.
 ## 5. Per module settings (the gear button)
 
 Give any element a non-empty `Settings` table and a gear appears on the right of
-its row. Clicking it slides a settings panel in from the **left** of the window,
-built from the same element builders:
+its row. The gear has two modes:
+
+* **Left click** slides the full height settings flyout in from the **left** of
+  the window — as tall as the window, scrolling if the rows do not fit.
+* **Right click** opens the **compact** panel in the same spot: it hugs its rows
+  and only grows up to ~300px, past which its body scrolls. A short module's
+  settings therefore take up much less of the screen. The topbar gear always
+  keeps the full height panel.
+
+Both are built from the same element builders:
 
 ```lua
 Tab:CreateToggle({
@@ -299,9 +307,10 @@ a module from its own `Callback`, or open the panel once (press the gear, or
 
 Every open rebuilds the rows from scratch. That rebuild is leak-free — the
 instances, the signal connections and the input handlers are all released again
-when the panel closes; `_devtest.lua` section 26 proves it by opening and
-closing the panel a hundred times and comparing the counters (connections
-`+0`, instances `+0`, input handlers `+0`). So if a menu starts lagging after a
+when the panel closes; `_devtest.lua` section 26 proves it for the full flyout
+by opening and closing the panel a hundred times and comparing the counters, and
+section 27 does the same for the compact popup (connections `+0`, instances
+`+0`, input handlers `+0`). So if a menu starts lagging after a
 while in a live game, measure before changing the layout: `_leakcheck.lua` prints
 the connection / object counts over time, and the row that keeps growing names
 the culprit (the interface, the game script's own loops, or a loop restarted on
