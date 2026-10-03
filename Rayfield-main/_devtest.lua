@@ -1150,6 +1150,38 @@ openKeyFlag:Set("J")
 check("config style rebind", XClient:GetOpenKey() == "J")
 check("Window:SetOpenKey", Window:SetOpenKey("K") == "K" and XClient:GetOpenKey() == "K")
 
+--  Multi character codes are CamelCase members of Enum.KeyCode ("Space",
+--  "RightShift"), so upper casing them ("SPACE") used to leave the bind
+--  silently inert: Enum.KeyCode["SPACE"] is not a member of the Enum.
+check("Space accepted as the open key", XClient:SetOpenKey("Space") == true and XClient:GetOpenKey() == "Space")
+check("the saved flag keeps the member name", openKeyFlag.CurrentKeybind == "Space")
+pressKey("Space", false)
+check("Space hides the menu", XClient:IsVisible() == false)
+pressKey("Space", false)
+check("Space shows the menu", XClient:IsVisible() == true)
+check("the readme's RightShift is accepted", XClient:SetOpenKey("RightShift") == true and XClient:GetOpenKey() == "RightShift")
+pressKey("RightShift", false)
+check("RightShift hides the menu", XClient:IsVisible() == false)
+pressKey("RightShift", false)
+check("RightShift shows the menu", XClient:IsVisible() == true)
+check("an EnumItem resolves to the member name", XClient:SetOpenKey(Enum.KeyCode.Space) == true and XClient:GetOpenKey() == "Space")
+XClient:SetOpenKey("K")
+check("open key back to K", XClient:GetOpenKey() == "K")
+
+--  Ordinary keybinds go through the same canonicalisation.
+local spaceFires = 0
+local SpaceKeybind = Main:CreateKeybind({
+	Name = "Space keybind",
+	CurrentKeybind = "Space",
+	Callback = function() spaceFires = spaceFires + 1 end,
+})
+check("a CamelCase CurrentKeybind is kept", SpaceKeybind.CurrentKeybind == "Space")
+pressKey("Space", false)
+check("the Space bind fires", spaceFires == 1)
+SpaceKeybind:Set(Enum.KeyCode.RightShift)
+check("Set takes an EnumItem", SpaceKeybind.CurrentKeybind == "RightShift")
+
+
 Window:ShowSettings()
 local flyout = root:FindFirstChild("SettingsFlyout")
 local flyoutBody = flyout and flyout:FindFirstChild("Body")

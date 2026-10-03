@@ -1661,6 +1661,50 @@ local function keyName(code)
 	return (tostring(code):match("%.(%w+)$")) or tostring(code)
 end
 
+--  Enum.KeyCode members are case sensitive: single letters and digit codes are
+--  upper case ("K", "F5") while every other code is CamelCase ("Space",
+--  "LeftShift", "RightShift", "Up", ...).  Upper casing a name therefore
+--  silently breaks the bind, because Enum.KeyCode["SPACE"] is not a member of
+--  the Enum.  This resolves whatever the caller passed - a string in any
+--  casing or an EnumItem - to the canonical member name, and returns nil for
+--  values that are not a usable KeyCode (Enum.KeyCode.Unknown included).
+local keyCodeLookup
+local function resolveKeyName(value)
+	if type(value) == "string" then
+		value = value:match("^%s*(.-)%s*$") or ""
+	elseif typeof(value) == "EnumItem" then
+		local ok, name = pcall(function() return value.Name end)
+		value = (ok and type(name) == "string") and name or nil
+	end
+	if type(value) ~= "string" or value == "" then return nil end
+
+	if keyCodeLookup == nil then
+		keyCodeLookup = {}
+		local ok, items = pcall(function() return Enum.KeyCode:GetEnumItems() end)
+		if ok and type(items) == "table" then
+			for _, item in ipairs(items) do
+				local okItem, itemName = pcall(function() return item.Name end)
+				if okItem and type(itemName) == "string" then
+					keyCodeLookup[string.lower(itemName)] = itemName
+				end
+			end
+		end
+	end
+
+	local canonical = keyCodeLookup[string.lower(value)]
+	if canonical == nil then
+		--  Codes added after this build, or environments that cannot
+		--  enumerate the Enum, still resolve by their exact member name.
+		local ok, code = pcall(function() return Enum.KeyCode[value] end)
+		if ok and code then
+			local okName, codeName = pcall(function() return code.Name end)
+			if okName and type(codeName) == "string" then canonical = codeName end
+		end
+	end
+	if canonical == nil or canonical == "Unknown" then return nil end
+	return canonical
+end
+
 --  Keybind --------------------------------------------------------------
 --  Contract kept from the previous interface:
 --    * CurrentKeybind / CurrentKeybind is a plain string such as "Q"
@@ -1680,8 +1724,9 @@ function builders.Keybind(container, ctx, opts)
 	api.Base = base
 
 	local holdToInteract = opts.HoldToInteract and true or false
-	local current = opts.CurrentKeybind
-	if current ~= nil then current = tostring(current) end
+	--  A string in any casing ("Q", "Space", "space") or an EnumItem is
+	--  accepted; the canonical Enum.KeyCode member name is what gets stored.
+	local current = resolveKeyName(opts.CurrentKeybind)
 	api.CurrentKeybind = current
 	api.Value = current
 
@@ -1710,11 +1755,22 @@ function builders.Keybind(container, ctx, opts)
 		fitLabel(box, width - 16, { MaxSize = 13, MinSize = 9 })
 	end
 
-	local function keyCode()
-		if not api.CurrentKeybind or api.CurrentKeybind == "" then return nil end
-		local ok, code = pcall(function() return Enum.KeyCode[api.CurrentKeybind] end)
-		if ok then return code end
-		return nil
+	local function matches(input)
+		local bind = api.CurrentKeybind
+		if not bind or bind == "" then return false end
+		return resolveKeyName(input.KeyCode) == bind
+	end
+
+	--  A bind is stored as the canonical Enum.KeyCode member name ("Q",
+	--  "Space").  Values that are not KeyCodes are kept verbatim, the way they
+	--  always were, and the "no key" placeholders collapse to an empty string.
+	local function canonicalBind(value)
+		local resolved = resolveKeyName(value)
+		if resolved ~= nil then return resolved end
+		if typeof(value) == "EnumItem" then return "" end
+		local text = tostring(value or "")
+		if text == "Enum.KeyCode.Unknown" then text = "" end
+		return text
 	end
 
 	box.MouseButton1Click:Connect(function()
@@ -1733,8 +1789,7 @@ function builders.Keybind(container, ctx, opts)
 			return
 		end
 		if processed or opts.CallOnChange then return end
-		local code = keyCode()
-		if code and input.KeyCode == code then
+		if matches(input) then
 			if holdToInteract then
 				held = true
 				callSafe(opts.Callback, true)
@@ -1746,16 +1801,14 @@ function builders.Keybind(container, ctx, opts)
 
 	ctx.connections[#ctx.connections + 1] = UserInputService.InputEnded:Connect(function(input)
 		if not held then return end
-		local code = keyCode()
-		if code and input.KeyCode == code then
+		if matches(input) then
 			held = false
 			callSafe(opts.Callback, false)
 		end
 	end)
 
 	function api:Set(newKeybind)
-		newKeybind = tostring(newKeybind or "")
-		if newKeybind == "Enum.KeyCode.Unknown" then newKeybind = "" end
+		newKeybind = canonicalBind(newKeybind)
 		api.CurrentKeybind = newKeybind
 		api.Value = newKeybind
 		listening = false
@@ -1769,8 +1822,7 @@ function builders.Keybind(container, ctx, opts)
 	--  updates the shown key without firing the callback and without saving;
 	--  used when the bind is changed from somewhere else (XClient:SetOpenKey)
 	function api:SetSilent(newKeybind)
-		newKeybind = tostring(newKeybind or "")
-		if newKeybind == "Enum.KeyCode.Unknown" then newKeybind = "" end
+		newKeybind = canonicalBind(newKeybind)
 		api.CurrentKeybind = newKeybind
 		api.Value = newKeybind
 		listening = false
@@ -4957,12 +5009,10 @@ function XClient:CreateWindow(settings)
 	--  The bind appears in the settings panel as "Menu open key", is stored in
 	--  the configuration like any other flag and can be changed with
 	--  XClient:SetOpenKey("K") or Window:SetOpenKey("K").
-	local function normalizeKey(value)
-		if value == nil then return nil end
-		if typeof(value) == "EnumItem" then return string.upper(value.Name) end
-		if type(value) == "string" and value ~= "" then return string.upper(value) end
-		return nil
-	end
+	--  Key names are canonicalised against Enum.KeyCode (see resolveKeyName),
+	--  so "Space", "space" and Enum.KeyCode.Space all become "Space" and the
+	--  bind keeps working whatever casing it was stored with.
+	local normalizeKey = resolveKeyName
 
 	local toggleKey = normalizeKey(settings.OpenKey)
 		or normalizeKey(settings.DefaultOpenKey)
@@ -5331,8 +5381,9 @@ function XClient:CreateWindow(settings)
 
 	ctx.connections[#ctx.connections + 1] = UserInputService.InputBegan:Connect(function(input, processed)
 		if processed or not toggleKey or toggleKey == "" then return end
-		local ok, code = pcall(function() return Enum.KeyCode[toggleKey] end)
-		if ok and code and input.KeyCode == code then
+		--  Both sides are canonical member names, so "Space" (and every other
+		--  CamelCase code) matches whatever casing the bind was stored with.
+		if resolveKeyName(input.KeyCode) == toggleKey then
 			setVisible(not visible)
 		end
 	end)
@@ -6236,9 +6287,7 @@ end
 --  Menu open key ---------------------------------------------------------
 --  Sets the default bind for every window, including the ones already open.
 function XClient:SetOpenKey(key)
-	local normalized
-	if typeof(key) == "EnumItem" then normalized = string.upper(key.Name) end
-	if type(key) == "string" then normalized = string.upper(key) end
+	local normalized = resolveKeyName(key)
 	if normalized == nil then return false end
 	XClient.OpenKey = normalized
 	for _, setter in ipairs(openKeySetters) do callSafe(setter, normalized) end
