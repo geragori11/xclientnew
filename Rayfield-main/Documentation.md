@@ -248,6 +248,21 @@ Tab:CreateSection("Aim")        -- returned: :Set(newName)
 Tab:CreateDivider()             -- returned: :Set(visible)
 ```
 
+### CreateGroupBox
+```lua
+Tab:CreateGroupBox({
+	Name = "Aim",
+	Elements = {
+		{ Type = "Toggle", Name = "Enabled", Flag = "aimEnabled" },
+		{ Type = "Slider", Name = "FOV", Range = { 1, 180 }, Flag = "aimFov" },
+		"Advanced",                             -- a plain string is a section
+	},
+})
+-- returned: :Add(e)  :AddMany(list)  :Clear()  :SetTitle(text)
+--           :Set({ Name, Elements })  :Serialize()  :Load(values)
+```
+A Neverlose style card that holds other elements — see **section 18**.
+
 ---
 
 ## 5. Per module settings (the gear button)
@@ -439,6 +454,7 @@ Elements added on top of the previous interface (all backwards compatible):
 | Analog stick | `Tab:CreateAnalog` | 16.9 |
 | Radar | `Tab:CreateRadar` | 16.10 |
 | Chips | `Tab:CreateChips` | 16.11 |
+| Group box card | `Tab:CreateGroupBox` | 18 |
 
 ---
 
@@ -1001,4 +1017,87 @@ getgenv().XClientLoaderOptions = nil                 -- back to normal on the ne
 
 ---
 
+## 18. GroupBox (Neverlose style card)
+
+`Tab:CreateGroupBox` builds a card — a bluish tinted container with a caption and
+a hairline header that holds other elements. Every `Type` the builders know goes
+inside, and so does a plain string (which becomes a section):
+
+```lua
+local Aim = Tab:CreateGroupBox({
+	Name = "Aim",
+	Elements = {
+		{ Type = "Toggle", Name = "Enabled", Flag = "aimEnabled" },
+		{ Type = "Slider", Name = "FOV", Range = { 1, 180 }, Increment = 5, Flag = "aimFov" },
+		"Advanced",                                  -- a plain string = a section
+		{ Type = "Toggle", Name = "Auto fire", Flag = "aimAutoFire" },
+		{   -- a card inside the card
+			Type = "GroupBox", Name = "Prediction",
+			Elements = {
+				{ Type = "Slider", Name = "Lead", Range = { 0, 1 }, CurrentValue = 0.15, Flag = "aimLead" },
+			},
+		},
+	},
+})
+```
+
+The card sizes itself to its content — it grows when a caption wraps — and the
+children keep the exact same contract they have on a tab: each returns its own
+settings table, registers its own flag and is saved / loaded by the
+configuration system without any extra work. The nested rows sit on the card's
+own surface, so they are drawn flat: no second background and no second border.
+There is no depth limit, so a card can hold another card; the nested card is
+drawn flat, one level in.
+
+Filling the card later and reading it back:
+
+```lua
+Aim:Add({ Type = "Toggle", Name = "Team check", Flag = "aimTeam" })
+Aim:AddMany({ "Extras",
+	{ Type = "Dropdown", Name = "Hitbox", Options = { "Head", "Torso" }, Flag = "aimHitbox" } })
+
+Aim:SetTitle("Aim assist")                     -- renames the card
+Aim:Set({ Name = "Aim", Elements = { ... } })  -- rename and / or replace the children
+Aim:Clear()                                    -- remove every child and free its flag
+```
+
+| Card method | Effect |
+| --- | --- |
+| `:Add(element)` | append one child (a table descriptor or a section string) |
+| `:AddMany(list)` | append a list of children |
+| `:Clear()` | remove every child and unregister the flags they had registered |
+| `:SetTitle(text)` | rename the card |
+| `:Set({ Name = ..., Elements = ... })` | rename and / or replace the children |
+| `:Serialize()` | snapshot of every flagged child (nested cards included), `flag -> value` |
+| `:Load(values)` | apply such a snapshot through the normal `:Set` entry points |
+
+`Serialize` / `Load` speak the same language as the configuration system
+(section 7) and walk nested cards too, which makes them handy for named presets
+of a single card:
+
+```lua
+local preset = Aim:Serialize()   -- { aimEnabled = true, aimFov = 90, ... }
+Aim:Load(preset)                 -- callbacks fire and auto-save runs as usual
+```
+
+Inside a module's settings panel the card is a descriptor like any other, and
+`Elements` may also be spelled `Settings`, so it reads naturally in the list:
+
+```lua
+Tab:CreateToggle({
+	Name = "Aimbot",
+	Settings = {
+		{ Type = "GroupBox", Name = "Rage", Elements = {
+			{ Type = "Toggle", Name = "Auto fire", Flag = "rageAuto" },
+			{ Type = "Slider", Name = "Speed", Range = { 1, 20 }, Flag = "rageSpeed" },
+		} },
+	},
+})
+```
+
+The bluish tint is derived from the active palette (the elevated surface pulled
+towards the theme accent and nudged towards blue), so the three themes keep their
+own identity while every card still reads as the Neverlose style widget.
+
+---
 

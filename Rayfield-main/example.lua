@@ -178,6 +178,39 @@ local Divider = Tab:CreateDivider()
 --      ColorPicker:Set(Color3.fromRGB(0, 255, 0))
 --      XClient.Flags["Toggle1"]:Set(false)
 
+-- 4b. group box (Neverlose style card) ---------------------------------------
+--  A bluish tinted card lays out the elements added to it.  Everything a tab
+--  can build goes inside, and a plain string is a section.
+local AimGroup = Tab:CreateGroupBox({
+	Name = "Aim",
+	Elements = {
+		{ Type = "Toggle", Name = "Enabled", Flag = "GroupToggle" },
+		{ Type = "Slider", Name = "Field of view", Range = { 1, 180 }, CurrentValue = 90, Flag = "GroupFov" },
+		"Extras",                                          -- a plain string = a section
+		{ Type = "Toggle", Name = "Auto fire", Flag = "GroupAuto" },
+		{   -- a card inside the card (drawn flat, one level in)
+			Type = "GroupBox", Name = "Prediction",
+			Elements = {
+				{ Type = "Slider", Name = "Lead", Range = { 0, 1 }, CurrentValue = 0.15, Flag = "GroupLead" },
+			},
+		},
+	},
+})
+
+--  the card can also be filled later, renamed, and snapshotted like a profile
+AimGroup:Add({ Type = "Toggle", Name = "Team check", Flag = "GroupTeam" })
+AimGroup:SetTitle("Aim assist")
+local AimPreset = AimGroup:Serialize()          -- { GroupToggle = ..., GroupFov = ... }
+AimGroup:Load(AimPreset)                        -- callbacks fire, auto-save runs
+print("group box preset FOV", AimPreset.GroupFov)
+
+--  the same card works inside a module's settings (Elements may be Settings)
+local AimSidebar = Tab:CreateGroupBox({
+	Name = "Extras",
+	Settings = { { Type = "Toggle", Name = "Watermark", Flag = "GroupWatermark" } },
+})
+print("sidebar card children", #AimSidebar.Elements)
+
 -- 5. the new per module gear (left flyout) ----------------------------------
 local CombatModule = SecondTab:CreateToggle({
 	Name = "Aimbot",

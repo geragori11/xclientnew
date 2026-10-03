@@ -814,6 +814,66 @@ check("divider hidden", Divider.Element.Visible == false)
 Divider:Set(true)
 check("divider shown", Divider.Element.Visible == true)
 
+print("== 4b. group box (Neverlose style card) ==")
+local GroupBox = Main:CreateGroupBox({
+	Name = "Aim",
+	Elements = {
+		{ Type = "Toggle", Name = "Enabled", Flag = "gbToggle" },
+		{ Type = "Slider", Name = "FOV", Range = { 1, 180 }, Flag = "gbSlider" },
+		"Advanced",
+		{ Type = "Toggle", Name = "Auto fire", Flag = "gbAuto" },
+		{
+			Type = "GroupBox",
+			Name = "Predict",
+			Elements = { { Type = "Toggle", Name = "Deep", Flag = "gbDeep" } },
+		},
+	},
+})
+check("group box returned", realType(GroupBox) == "table")
+check("group box API", realType(GroupBox.Add) == "function" and realType(GroupBox.AddMany) == "function"
+	and realType(GroupBox.Clear) == "function" and realType(GroupBox.Serialize) == "function"
+	and realType(GroupBox.Load) == "function" and realType(GroupBox.SetTitle) == "function")
+check("group box built every child", #GroupBox.Elements == 5)
+check("a plain string became a section", GroupBox.Elements[3].Type == "Section")
+check("children registered their flags",
+	XClient.Flags["gbToggle"] ~= nil and XClient.Flags["gbSlider"] ~= nil and XClient.Flags["gbAuto"] ~= nil)
+check("rows inside the card drop their own background",
+	XClient.Flags["gbToggle"].Base.row.BackgroundTransparency == 1)
+
+local Nested = GroupBox.Elements[5]
+check("a group box can hold a group box",
+	realType(Nested) == "table" and Nested.Type == "GroupBox" and #Nested.Elements == 1)
+check("the nested flag is registered too", XClient.Flags["gbDeep"] ~= nil)
+
+GroupBox:Add({ Type = "Toggle", Name = "Extra", Flag = "gbExtra" })
+check(":Add grows the card", #GroupBox.Elements == 6 and XClient.Flags["gbExtra"] ~= nil)
+GroupBox:SetTitle("Aim assist")
+check(":SetTitle renames the card", GroupBox.Name == "Aim assist" and GroupBox.Title.Text == "Aim assist")
+
+--  a group snapshot speaks the same language as the configuration system
+XClient.Flags["gbToggle"]:Set(true)
+XClient.Flags["gbSlider"]:Set(42)
+XClient.Flags["gbDeep"]:Set(true)
+local snapshot = GroupBox:Serialize()
+check(":Serialize reads a toggle", snapshot.gbToggle == true)
+check(":Serialize reads a slider", snapshot.gbSlider == 42)
+check(":Serialize reaches the nested group", snapshot.gbDeep == true)
+
+XClient.Flags["gbToggle"]:Set(false)
+XClient.Flags["gbDeep"]:Set(false)
+GroupBox:Load(snapshot)
+check(":Load restores a toggle", XClient.Flags["gbToggle"].CurrentValue == true)
+check(":Load reaches the nested group", XClient.Flags["gbDeep"].CurrentValue == true)
+
+GroupBox:Set({ Elements = { { Type = "Toggle", Name = "Fresh", Flag = "gbFresh" } } })
+check(":Set replaced the children", #GroupBox.Elements == 1 and XClient.Flags["gbFresh"] ~= nil)
+check(":Set set the old flags free", XClient.Flags["gbToggle"] == nil and XClient.Flags["gbDeep"] == nil)
+
+GroupBox:Clear()
+check(":Clear empties the card", #GroupBox.Elements == 0)
+check(":Clear unregistered the last flag", XClient.Flags["gbFresh"] == nil)
+check(":Clear emptied the body", #GroupBox.Body:GetChildren() == 1)
+
 print("== 5. toggle (old CurrentValue + Flag + Callback contract) ==")
 local toggleValue
 local Toggle = Main:CreateToggle({
@@ -2006,6 +2066,11 @@ if exampleChunk then
 		check("example widget flags registered", instance.Flags["SkinPreview"] ~= nil
 			and instance.Flags["SkinPicture"] ~= nil and instance.Flags["Bones"] ~= nil
 			and instance.Flags["Recoil"] ~= nil and instance.Flags["PingGraph"] ~= nil)
+		check("example group box registered its children", instance.Flags["GroupToggle"] ~= nil
+			and instance.Flags["GroupFov"] ~= nil and instance.Flags["GroupAuto"] ~= nil
+			and instance.Flags["GroupTeam"] ~= nil)
+		check("example group box nested a card", instance.Flags["GroupLead"] ~= nil)
+		check("example group box accepted Settings", instance.Flags["GroupWatermark"] ~= nil)
 		check("example player widget works", instance.Flags["SkinPreview"]:GetRegion("Head") == false
 			and realType(instance.Flags["SkinPreview"].Highlight) == "table")
 		check("example window answers the new API", realType(instance.Windows[1].SetOpenKey) == "function"

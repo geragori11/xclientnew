@@ -406,7 +406,7 @@ XClient.Version = "1.0.0"
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.0.6"
+XClient.Build = "1.0.5"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -757,15 +757,20 @@ local function newRow(container, ctx, opts)
 	local hasGear = type(opts.Settings) == "table" and #opts.Settings > 0
 	local hasDesc = opts.Description ~= nil and opts.Description ~= ""
 	local rowHeight = tonumber(opts.Height) or ROW_HEIGHT
+	--  Rows built inside a GroupBox (or asked for it with OnCard = true) sit on
+	--  top of the card's own bluish surface instead of nesting a second card:
+	--  they drop their background and keep only a hairline outline.
+	local onCard = opts.OnCard == true or ctx.onCard == true
 
 	local row = newFrame({
 		Name = opts.Name or "Element",
 		BackgroundColor3 = theme.Surface,
+		BackgroundTransparency = onCard and 1 or 0,
 		Size = UDim2.new(1, 0, 0, rowHeight),
 		Parent = container,
 	})
 	addCorner(row, UDim.new(0, 6))
-	local stroke = addStroke(row, theme.StrokeSoft, 1, 0.3)
+	local stroke = addStroke(row, theme.StrokeSoft, 1, onCard and 0.6 or 0.3)
 
 	local titleX = ROW_PADDING_X
 	if resolveIcon(opts.Icon) then
@@ -2621,6 +2626,294 @@ function builders.Paragraph(container, ctx, opts)
 	end
 	return api
 end
+
+--  GroupBox --------------------------------------------------------------
+--  A Neverlose style card: a bluish tinted container with a caption and a
+--  hairline header that lays out the elements added to it.  It is a
+--  *container*, not a row - everything a tab can build goes inside:
+--
+--      local Group = Tab:CreateGroupBox({
+--          Name = "Aim",
+--          Elements = {
+--              { Type = "Toggle", Name = "Enabled",  Flag = "aimEnabled" },
+--              { Type = "Slider", Name = "FOV", Range = { 1, 180 }, Flag = "aimFov" },
+--              "Advanced",                       -- a plain string is a section
+--              { Type = "Toggle", Name = "Auto fire", Flag = "aimAutoFire" },
+--          },
+--      })
+--      Group:Add({ Type = "Toggle", Name = "Extra", Flag = "aimExtra" })
+--
+--  The nested elements keep the exact same contract they have on a tab: they
+--  return their settings table, register their own flag and are picked up by
+--  the configuration system on their own.  The whole group works inside a
+--  module's settings flyout too, and there is no depth limit, so a GroupBox
+--  can hold another GroupBox (the sub-cards are drawn flat, one level in).
+local GROUPBOX_PADDING = 8
+local GROUPBOX_GAP = 6
+local GROUPBOX_HEADER = 22
+--  Horizontal space a nested element loses to the card (padding on both sides
+--  plus a hair of breathing room), so captions wrapped inside the group are
+--  fitted against the narrower width instead of the page width.
+local GROUPBOX_INSET = GROUPBOX_PADDING * 2 + 4
+
+--  The bluish card tint: the palette's elevated surface pulled 12% towards its
+--  accent and then nudged towards blue.  The three themes keep their own
+--  identity (Neverlose reads blue, Midnight purple-blue, Blood a muted maroon)
+--  while every group still reads as the Neverlose style card.
+local function groupBoxColor(theme)
+	local base = theme.SurfaceAlt or theme.Surface
+	local accent = theme.Accent or base
+	local r = base.R + (accent.R - base.R) * 0.12
+	local g = base.G + (accent.G - base.G) * 0.12
+	local b = base.B + (accent.B - base.B) * 0.12
+	return Color3.new(
+		math.clamp(r * 0.92 + 0.012, 0, 1),
+		math.clamp(g * 0.96 + 0.030, 0, 1),
+		math.clamp(b * 0.98 + 0.060, 0, 1)
+	)
+end
+
+function builders.GroupBox(container, ctx, opts)
+	opts = opts or {}
+	local theme = ctx.theme()
+	local title = tostring(opts.Name or opts.Title or "")
+
+	local holder = newFrame({
+		Name = "GroupBox",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = container,
+	})
+
+	local card = newFrame({
+		Name = "Card",
+		BackgroundColor3 = groupBoxColor(theme),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = holder,
+	})
+	addCorner(card, UDim.new(0, 8))
+	addStroke(card, theme.Stroke, 1, 0.2)
+	addPadding(card, GROUPBOX_PADDING)
+	addList(card, { Padding = UDim.new(0, GROUPBOX_GAP) })
+
+	local header = newFrame({
+		Name = "Header",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, GROUPBOX_HEADER),
+		Parent = card,
+	})
+	local headerText = newText({
+		Name = "Title",
+		Text = title,
+		TextSize = 13,
+		Font = THEME_FONT_BOLD,
+		TextColor3 = theme.Text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.new(1, 0, 0, 15),
+		Position = UDim2.new(0, 2, 0, 0),
+		Parent = header,
+	})
+	--  Hairline separating the caption from the body.  It lives inside the
+	--  header (not the card) so the card's UIListLayout never lays it out.
+	newFrame({
+		Name = "Line",
+		BackgroundColor3 = theme.StrokeSoft,
+		Size = UDim2.new(1, 0, 0, 1),
+		Position = UDim2.new(0, 0, 1, -2),
+		Parent = header,
+	})
+	local function fitTitle()
+		fitLabel(headerText, math.max(48, (tonumber(ctx.rowWidth) or ROW_WIDTH) - GROUPBOX_INSET), { MinSize = 10 })
+	end
+	fitTitle()
+
+	local body = newFrame({
+		Name = "Body",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = card,
+	})
+	addList(body, { Padding = UDim.new(0, GROUPBOX_GAP) })
+
+	local api = {
+		Type = "GroupBox",
+		Name = title,
+		Element = holder,   -- what the topbar search shows / hides
+		Holder = holder,
+		Card = card,
+		Body = body,
+		Title = headerText,
+		Elements = {},
+	}
+
+	--  Every element that registered a flag is reached through the built
+	--  element tables (nested groups included), which is exactly what a
+	--  snapshot of the group needs to walk.
+	local function forEachFlagged(elements, fn)
+		for _, element in ipairs(elements or {}) do
+			if type(element) == "table" then
+				if element.Flag then fn(element) end
+				if element.Elements then forEachFlagged(element.Elements, fn) end
+			end
+		end
+	end
+
+	--  Reads an element's saved value using the same shapes serializeFlags()
+	--  writes to the configuration (see section 7), so a group snapshot and a
+	--  configuration file speak the same language.
+	local function elementValue(element)
+		local elementType = element.Type
+		if elementType == "ColorPicker" then
+			local color = element.Color or Color3.fromRGB(255, 255, 255)
+			return {
+				R = math.floor(color.R * 255 + 0.5),
+				G = math.floor(color.G * 255 + 0.5),
+				B = math.floor(color.B * 255 + 0.5),
+			}
+		elseif elementType == "Toggle" then
+			return element.CurrentValue and true or false
+		elseif elementType == "Dropdown" then
+			local copy = {}
+			for i, option in ipairs(element.CurrentOption or {}) do copy[i] = option end
+			return copy
+		elseif elementType == "Keybind" then
+			return tostring(element.CurrentKeybind or "")
+		elseif elementType == "Input" then
+			return tostring(element.CurrentValue or "")
+		elseif elementType == "Slider" then
+			return element.CurrentValue
+		elseif type(element.Serialize) == "function" then
+			local ok, serialized = pcall(element.Serialize, element)
+			if ok then return serialized end
+		end
+		return nil
+	end
+
+	--  Builds one child descriptor the same way buildModuleSettings resolves a
+	--  Settings entry: a table with a Type (defaulting to Toggle) or a plain
+	--  string for a section.  The page width is swapped for the card's inner
+	--  width - and OnCard is raised - while the child is built, so caption
+	--  fitting (and therefore wrapping) uses the narrower space and the row
+	--  lands flat on the card.
+	local function buildChild(child)
+		local previousWidth = ctx.rowWidth
+		local previousOnCard = ctx.onCard
+		ctx.rowWidth = math.max(120, (previousWidth or ROW_WIDTH) - GROUPBOX_INSET)
+		ctx.onCard = true
+		local ok, built
+		if type(child) == "string" then
+			ok, built = pcall(builders.Section, body, ctx, child)
+		elseif type(child) == "table" then
+			local elementType = child.Type or "Toggle"
+			local builder = builders[elementType]
+			if type(builder) == "function" then
+				ok, built = pcall(builder, body, ctx, child)
+			else
+				ok, built = false, "unsupported element type '" .. tostring(elementType) .. "'"
+			end
+		else
+			ok, built = false, "unsupported group entry (" .. type(child) .. ")"
+		end
+		ctx.rowWidth = previousWidth
+		ctx.onCard = previousOnCard
+		if not ok then
+			warn("[XClient] GroupBox: " .. tostring(built))
+			return nil
+		end
+		if type(built) == "table" then
+			api.Elements[#api.Elements + 1] = built
+		end
+		return built
+	end
+
+	function api:Add(child)
+		return buildChild(child)
+	end
+
+	function api:AddMany(list)
+		local added = {}
+		if type(list) ~= "table" then return added end
+		for _, child in ipairs(list) do
+			added[#added + 1] = buildChild(child)
+		end
+		return added
+	end
+
+	--  Removes every nested element and forgets the flags they had registered,
+	--  so a cleared group stops writing values for rows that no longer exist.
+	function api:Clear()
+		forEachFlagged(api.Elements, function(element)
+			if ctx.flags[element.Flag] == element then ctx.flags[element.Flag] = nil end
+			if XClient.Flags[element.Flag] == element then XClient.Flags[element.Flag] = nil end
+		end)
+		body:ClearAllChildren()
+		addList(body, { Padding = UDim.new(0, GROUPBOX_GAP) })
+		api.Elements = {}
+		return api
+	end
+
+	function api:SetTitle(newTitle)
+		newTitle = tostring(newTitle or "")
+		api.Name = newTitle
+		headerText.Text = newTitle
+		fitTitle()
+		return api
+	end
+
+	function api:Set(newSettings)
+		if type(newSettings) ~= "table" then return api end
+		if newSettings.Name ~= nil or newSettings.Title ~= nil then
+			api:SetTitle(newSettings.Name or newSettings.Title)
+		end
+		if type(newSettings.Elements) == "table" then
+			api:Clear()
+			api:AddMany(newSettings.Elements)
+		end
+		return api
+	end
+
+	--  Snapshot of every flagged element in the group as a flat flag -> value
+	--  map, e.g. to keep named presets of a single card.  :Load applies it
+	--  back through the normal :Set entry point, so callbacks and auto-save
+	--  behave exactly like a manual change.
+	function api:Serialize()
+		local data = {}
+		forEachFlagged(api.Elements, function(element)
+			local value = elementValue(element)
+			if value ~= nil then data[element.Flag] = value end
+		end)
+		return data
+	end
+
+	function api:Load(values)
+		if type(values) ~= "table" then return api end
+		forEachFlagged(api.Elements, function(element)
+			if type(element.Set) == "function" and values[element.Flag] ~= nil then
+				local value = values[element.Flag]
+				if element.Type == "ColorPicker" and type(value) == "table" then
+					value = Color3.fromRGB(
+						tonumber(value.R) or 255,
+						tonumber(value.G) or 255,
+						tonumber(value.B) or 255
+					)
+				end
+				callSafe(function() return element:Set(value) end)
+			end
+		end)
+		return api
+	end
+
+	--  Children may be handed over up front through Elements; Settings is
+	--  accepted as well, so a GroupBox reads naturally when dropped into a
+	--  module's Settings list.  Add / AddMany fill the card later.
+	api:AddMany(opts.Elements or opts.Settings or {})
+
+	return api
+end
+
 
 --=========================================================================
 --  9b. EXTRA WIDGETS
@@ -5957,6 +6250,8 @@ function XClient:CreateWindow(settings)
 		function tab:CreateKeybind(settings) return addRecord({ type = "Keybind", opts = settings or {} }) end
 		function tab:CreateColorPicker(settings) return addRecord({ type = "ColorPicker", opts = settings or {} }) end
 		function tab:CreateParagraph(settings) return addRecord({ type = "Paragraph", opts = settings or {} }) end
+		--  A Neverlose style card that holds other elements (see section 18).
+		function tab:CreateGroupBox(settings) return addRecord({ type = "GroupBox", opts = settings or {} }) end
 		function tab:CreateDivider() return addRecord({ type = "Divider" }) end
 		function tab:CreateSection(sectionName) return addRecord({ type = "Section", name = sectionName }) end
 
