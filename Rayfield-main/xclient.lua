@@ -1402,6 +1402,29 @@ function builders.Dropdown(container, ctx, opts)
 		fitLabel(label, boxWidth - 28, { MaxSize = 13, MinSize = 9 })
 	end
 
+	--  Every row currently built in an open list, kept so a selection change
+	--  can repaint the rows the user is looking at.
+	local rows = {}
+
+	local function paintRow(row)
+		local isOn = listFind(selected, row.name) ~= nil
+		--  an unselected row keeps its hover highlight while the pointer rests
+		--  on it (otherwise clicking a row to uncheck it dropped the highlight)
+		local hot = isOn or row.hovered
+		row.item.BackgroundColor3 = hot and theme.SurfaceHover or theme.Surface
+		row.label.TextColor3 = isOn and theme.Accent or theme.Text
+		row.check.Visible = isOn
+	end
+
+	--  Repaint the open list after a toggle.  The row colours and the tick used
+	--  to be captured once in buildList, so a multi-select row only caught up
+	--  the next time the list was rebuilt and the click looked ignored.
+	local function paintRows()
+		for _, row in ipairs(rows) do
+			if row.item.Parent then paintRow(row) end
+		end
+	end
+
 	local function choose(name, close)
 		if multi then
 			local index = listFind(selected, name)
@@ -1416,12 +1439,14 @@ function builders.Dropdown(container, ctx, opts)
 		api.CurrentOption = selected
 		api.Value = selected
 		display()
+		paintRows()
 		callSafe(opts.Callback, api.CurrentOption)
 		ctx.saveConfiguration()
 		if not multi and close then close() end
 	end
 
 	local function buildList(scroll, close)
+		rows = {}
 		for _, name in ipairs(options) do
 			local isOn = listFind(selected, name) ~= nil
 			local item = create("TextButton", {
@@ -1444,24 +1469,27 @@ function builders.Dropdown(container, ctx, opts)
 				Parent = item,
 			})
 			fitLabel(optionLabel, math.max(60, (opts.Width or 130) - 24), { MinSize = 9 })
-			if isOn then
-				local dot = newFrame({
-					Name = "Check",
-					BackgroundColor3 = theme.Accent,
-					Size = UDim2.fromOffset(6, 6),
-					Position = UDim2.new(1, -13, 0.5, 0),
-					AnchorPoint = Vector2.new(0, 0.5),
-					Parent = item,
-				})
-				addCorner(dot, UDim.new(1, 0))
-			end
+			--  The tick is always built and only shown/hidden, so repainting a
+			--  row never has to create or destroy instances.
+			local dot = newFrame({
+				Name = "Check",
+				BackgroundColor3 = theme.Accent,
+				Size = UDim2.fromOffset(6, 6),
+				Position = UDim2.new(1, -13, 0.5, 0),
+				AnchorPoint = Vector2.new(0, 0.5),
+				Visible = isOn,
+				Parent = item,
+			})
+			addCorner(dot, UDim.new(1, 0))
+			local row = { name = name, item = item, label = optionLabel, check = dot }
+			rows[#rows + 1] = row
 			item.MouseEnter:Connect(function()
-				if isOn then return end
-				item.BackgroundColor3 = theme.SurfaceHover
+				row.hovered = true
+				paintRow(row)
 			end)
 			item.MouseLeave:Connect(function()
-				if isOn then return end
-				item.BackgroundColor3 = theme.Surface
+				row.hovered = false
+				paintRow(row)
 			end)
 			item.MouseButton1Click:Connect(function()
 				choose(name, close)
@@ -1883,9 +1911,15 @@ function builders.ColorPicker(container, ctx, opts)
 			Size = UDim2.fromScale(1, 1),
 			Parent = sv,
 		})
+		--  UIGradient.Rotation is a clockwise rotation of the default
+		--  left-to-right direction, so 90 runs top -> bottom: t=0 sits on the
+		--  top edge.  The marker reads value 1 at the top (1 - val), so the
+		--  shade has to be invisible up there and turn opaque black at the
+		--  bottom.  The old 0 -> 1 sequence put the black at the top, which
+		--  made the colour under the marker disagree with the picked value.
 		create("UIGradient", {
 			Color = ColorSequence.new(Color3.fromRGB(0, 0, 0)),
-			Transparency = NumberSequence.new(0, 1),
+			Transparency = NumberSequence.new(1, 0),
 			Rotation = 90,
 			Parent = black,
 		})

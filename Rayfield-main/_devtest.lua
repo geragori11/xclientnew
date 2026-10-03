@@ -741,6 +741,27 @@ if multiList then
 end
 check("multi select keeps several options", #MultiDropdown.CurrentOption == 2)
 check("multi select keeps the popup open", root:FindFirstChild("Popup") ~= nil)
+	--  The visual state of a row has to follow the click immediately.  The
+	--  colours and the tick used to be captured once while the list was built,
+	--  so a click only showed up the next time the list was reopened.
+	local multiRowA = multiList and multiList:FindFirstChild("A")
+	local multiTitleA = multiRowA and multiRowA:FindFirstChild("Title")
+	local multiTickA = multiRowA and multiRowA:FindFirstChild("Check")
+	check("every row carries a tick, shown or not", multiTickA ~= nil)
+	check("tick is shown the moment the option is picked", multiTickA ~= nil and multiTickA.Visible == true)
+	check("picked row is repainted in place", multiTitleA ~= nil and multiTickA ~= nil
+		and multiTitleA.TextColor3 == multiTickA.BackgroundColor3)
+	local multiPickedBackground = multiRowA and multiRowA.BackgroundColor3
+	if multiList then
+		multiList:FindFirstChild("A").MouseButton1Click:Fire()
+	end
+	check("unticking drops the option straight away", #MultiDropdown.CurrentOption == 1
+		and MultiDropdown.CurrentOption[1] == "B")
+	check("unticked row hides its tick straight away", multiTickA ~= nil and multiTickA.Visible == false)
+	check("unticked row is repainted as well", multiRowA ~= nil
+		and multiRowA.BackgroundColor3 ~= multiPickedBackground)
+
+
 MultiDropdown.Base.row:FindFirstChild("Selector").MouseButton1Click:Fire()
 check("popup closed again", root:FindFirstChild("Popup") == nil)
 
@@ -839,6 +860,30 @@ if sv then
 	UserInputService.InputEnded:Fire({ UserInputType = Enum.UserInputType.MouseButton1 })
 end
 check("dragging the picker changed the colour", Picker.Color ~= nil)
+
+--  The value shade has to fade the same way the marker reads the value:
+--  invisible at the top (value 1) turning into black at the bottom (value 0).
+--  It used to run 0 -> 1, which put the black under the top of the pad and
+--  made the colour under the marker disagree with the picked value.
+local saturationShade = sv and sv:FindFirstChild("Saturation")
+local saturationGradient = saturationShade and saturationShade:FindFirstChildOfClass("UIGradient")
+check("saturation shade fades left -> right", saturationGradient ~= nil
+	and saturationGradient.Rotation == 0
+	and saturationGradient.Transparency.A == 0 and saturationGradient.Transparency.B == 1)
+local valueShade = sv and sv:FindFirstChild("Value")
+local valueGradient = valueShade and valueShade:FindFirstChildOfClass("UIGradient")
+check("value shade runs top -> bottom", valueGradient ~= nil and valueGradient.Rotation == 90)
+check("value shade is clear at the top and black at the bottom", valueGradient ~= nil
+	and valueGradient.Transparency.A == 1 and valueGradient.Transparency.B == 0)
+local svMarker = sv and sv:FindFirstChild("Marker")
+Picker:Set(Color3.fromRGB(0, 0, 255))
+check("a full value parks the marker on the clear edge of the shade",
+	svMarker ~= nil and svMarker.Position.Y.Scale == 0)
+Picker:Set(Color3.fromRGB(0, 0, 0))
+check("no value parks the marker on the black edge of the shade",
+	svMarker ~= nil and svMarker.Position.Y.Scale == 1)
+Picker:Set(Color3.fromRGB(0, 255, 0))
+
 if pickerPopup then pickerPopup:FindFirstChild("Hex").FocusLost:Fire(false) end
 
 print("== 11. per module gear + left settings flyout ==")
