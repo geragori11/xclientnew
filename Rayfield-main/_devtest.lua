@@ -934,6 +934,40 @@ check("file removed", isfile("XClient/Configurations/Legacy.rfld") == false)
 check("deleting twice returns false", XClient:DeleteConfiguration("Legacy") == false)
 check("XClient:LoadConfiguration", XClient:LoadConfiguration() == true)
 
+print("== 12b. favourite colours, multi drop-down helper and auto-save ==")
+check("FavoriteSlots exposed", XClient.FavoriteSlots == 9)
+check("SetFavoriteColor stores a colour", XClient:SetFavoriteColor(1, Color3.fromRGB(255, 0, 0)) == true)
+check("GetFavoriteColor reads it back", XClient:GetFavoriteColor(1) ~= nil and XClient:GetFavoriteColor(1).R > 0.99)
+check("GetFavoriteColors returns a table", realType(XClient:GetFavoriteColors()) == "table")
+check("out-of-range slot refused", XClient:SetFavoriteColor(99, Color3.fromRGB(1, 2, 3)) == false)
+check("non-colour value refused", XClient:SetFavoriteColor(2, "red") == false)
+check("ClearFavoriteColor empties a slot", XClient:ClearFavoriteColor(2) == true and XClient:GetFavoriteColor(2) == nil)
+
+--  the palette travels inside the configuration file
+XClient:SaveConfiguration()
+check("palette written with the configuration", string.find(files["XClient/Configurations/Big Hub.rfld"], "__favorite_colors") ~= nil)
+
+--  ... and it comes back on the next load
+XClient:ClearFavoriteColor(1)
+check("palette cleared before loading", XClient:GetFavoriteColor(1) == nil)
+XClient:LoadConfiguration()
+check("palette restored on load", XClient:GetFavoriteColor(1) ~= nil and XClient:GetFavoriteColor(1).R > 0.99)
+
+--  dedicated multi-select helper
+local MultiPick = Second:CreateMultiDropdown({ Name = "Multi picker", Options = { "A", "B", "C" }, Flag = "multiPick" })
+check("CreateMultiDropdown returns a dropdown", realType(MultiPick) == "table" and MultiPick.Type == "Dropdown")
+check("multi helper forces MultipleOptions on", MultiPick.MultipleOptions == true)
+check("multi helper registered a flag", XClient.Flags["multiPick"] ~= nil)
+MultiPick:Set({ "A", "C" })
+check("multi helper keeps several options", #MultiPick.CurrentOption == 2)
+
+--  the auto-save switch is remembered in its own preferences file
+check("GetAutoSave defaults to true", XClient:GetAutoSave() == true)
+check("SetAutoSave(false)", XClient:SetAutoSave(false) == false)
+check("preferences file written", isfile("XClient/Preferences.rfld"))
+check("preferences remember the switch", string.find(files["XClient/Preferences.rfld"], "false") ~= nil)
+check("SetAutoSave(true)", XClient:SetAutoSave(true) == true)
+
 print("== 13. themes ==")
 check("ModifyTheme (dot call, as in the old examples)", Window.ModifyTheme("DarkBlue") == true)
 check("ModifyTheme (colon call)", Window:ModifyTheme("Default") == true)

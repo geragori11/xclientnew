@@ -13,8 +13,15 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
 ## Features
 
 * Dark Neverlose layout: left tab rail, top bar with title, minimise and close.
-* Elements: button, toggle, slider, dropdown (single & multi), input, keybind,
-  colour picker, label, paragraph, section, divider.
+* Elements: button, toggle, slider, dropdown (single & multi, with a dedicated
+  `CreateMultiDropdown`), input, keybind, colour picker, label, paragraph,
+  section, divider.
+* **Dropdowns follow the page** — an open list stays glued to its row while you
+  scroll and dismisses itself when the row leaves the viewport.
+* **Colour pickers keep 9 favourite slots** (a 3x3 grid beside the hue /
+  saturation pads). Click an empty slot to store the current colour, click a
+  filled one to apply it, Shift+click to overwrite, right-click to clear. The
+  palette is shared by every picker and saved with the configuration.
 * **Extended widgets** — an interactive `PlayerWidget` character, a marker
   `Image` (skin visualisation), a crosshair/FOV pad, a live graph, a
   progress/loader, a stepper, segments, a wheel, an analog stick, a radar and
@@ -31,10 +38,12 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
 * **Per module gear** — give a row a `Settings = { ... }` table and a gear icon
   appears; pressing it slides a settings flyout in from the **left** of the
   window, built from the same element builders and saved like any other flag.
-* **Built-in configuration system** — save / load / delete / list named
-  configurations, autoload on start, in-window configuration panel behind the
-  topbar gear (which also holds the theme picker, the font picker, the menu key
-  and the configuration manager).
+* **Built-in configuration system** — **auto-save is on by default** (a running
+  `autocfg` file is created and reloaded on the next join), plus
+  save / load / delete / list named configurations and autoload on start, in the
+  in-window configuration panel behind the topbar gear (which also holds the
+  theme picker, the font picker, the auto-save switch, the menu key and the
+  configuration manager).
 * Three palettes (Neverlose, Midnight, Blood) plus the theme names old scripts
   use, and custom palette tables.
 * Named (Lucide) icons via `icons.lua`, Roblox asset ids, or plain URLs.
@@ -51,7 +60,9 @@ local Window = XClient:CreateWindow({
 	OpenKey = "K",                      -- key that shows / hides the menu
 	LoadingTitle = "My Script",         -- optional boot animation
 	LoadingDuration = 1.4,
-	ConfigurationSaving = { Enabled = true, FileName = "My Config" },
+	-- Auto-save to XClient/Configurations/autocfg.rfld is ON by default, so
+	-- nothing else is needed.  To use another file (or opt out) pass:
+	-- ConfigurationSaving = { Enabled = true, FileName = "My Config" },
 })
 
 local Tab = Window:CreateTab("Combat", 4483362458)

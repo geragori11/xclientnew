@@ -374,6 +374,10 @@ local Themes = {
 --  4. GLOBAL STATE
 --=========================================================================
 
+--  Number of favourite-colour slots shown to the right of every colour picker
+--  (shared palette, see XClient.FavoriteColors below).
+local FAVORITE_SLOTS = 9
+
 local XClient = {}
 XClient.__index = XClient
 
@@ -381,6 +385,13 @@ XClient.Version = "1.0.0"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
+--  Shared palette of favourite colours (the FAVORITE_SLOTS slots shown to the
+--  right of every colour picker).  Clicking an empty slot stores the current
+--  colour, clicking a filled slot applies it back to the picker and the whole
+--  palette is saved with the configuration under the reserved key
+--  __favorite_colors, so it survives a rejoin together with the menu.
+XClient.FavoriteColors = {}
+XClient.FavoriteSlots = FAVORITE_SLOTS
 XClient.Windows = {}
 XClient.Connections = {}
 XClient.Unloaded = false
@@ -963,6 +974,7 @@ function builders.Toggle(container, ctx, opts)
 		value = v and true or false
 		api.Value = value
 		render(true, true)
+		ctx.saveConfiguration()
 	end
 
 	function api:SetSilent(v)
@@ -975,6 +987,7 @@ function builders.Toggle(container, ctx, opts)
 		value = not value
 		api.Value = value
 		render(true, true)
+		ctx.saveConfiguration()
 	end)
 
 	render(false, false)
@@ -1014,7 +1027,8 @@ function builders.Slider(container, ctx, opts)
 		Text = "",
 		AutoButtonColor = false,
 		BackgroundColor3 = theme.SliderTrack,
-		Size = UDim2.fromOffset(trackWidth, 5),
+		--  A thicker "pill" track (was 5px tall) so it clearly reads as a slider.
+		Size = UDim2.fromOffset(trackWidth, 10),
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 0, 0.5, 0),
 		Parent = base.row,
@@ -1032,7 +1046,8 @@ function builders.Slider(container, ctx, opts)
 	local knob = newFrame({
 		Name = "Knob",
 		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-		Size = UDim2.fromOffset(12, 12),
+		--  Bigger knob (was 12x12) to match the thicker track.
+		Size = UDim2.fromOffset(24, 24),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0, 0, 0.5, 0),
 		Parent = track,
@@ -1104,6 +1119,8 @@ function builders.Slider(container, ctx, opts)
 	end)
 	ctx.connections[#ctx.connections + 1] = UserInputService.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			--  Persist once the drag finished (not on every intermediate step).
+			if dragging then ctx.saveConfiguration() end
 			dragging = false
 		end
 	end)
@@ -1112,6 +1129,7 @@ function builders.Slider(container, ctx, opts)
 		value = math.clamp(v, min, max)
 		api.Value = value
 		render(true)
+		ctx.saveConfiguration()
 	end
 
 	function api:SetSilent(v)
@@ -1147,6 +1165,27 @@ local function makeChevron(parent, color, size, up)
 	return holder
 end
 
+--  Nearest scrollable viewport above an element (a tab page or the settings
+--  flyout).  Used to keep popups glued to their anchor while the page scrolls
+--  and to dismiss them once the row scrolls out of view.
+local function enclosingScroller(object)
+	local node = object and object.Parent
+	while node do
+		if node:IsA("ScrollingFrame") then return node end
+		node = node.Parent
+	end
+	return nil
+end
+
+local function anchorInView(anchor, scroller)
+	if not scroller then return true end
+	if not scroller.Parent or not scroller.Visible then return false end
+	local top = scroller.AbsolutePosition.Y
+	local bottom = top + scroller.AbsoluteSize.Y
+	local center = anchor.AbsolutePosition.Y + anchor.AbsoluteSize.Y * 0.5
+	return center >= top - 4 and center <= bottom + 4
+end
+
 local function openPopup(ctx, anchor, width, height, builder)
 	ctx.closePopup()
 	local theme = ctx.theme()
@@ -1173,9 +1212,26 @@ local function openPopup(ctx, anchor, width, height, builder)
 	addCorner(popup, UDim.new(0, 6))
 	addStroke(popup, theme.Stroke, 1, 0)
 
-	local absAnchor = anchor.AbsolutePosition
-	local absRoot = root.AbsolutePosition
-	popup.Position = UDim2.fromOffset(absAnchor.X - absRoot.X, absAnchor.Y - absRoot.Y + anchor.AbsoluteSize.Y + 4)
+	--  The popup is parented to the window (not to the row) so it has to be
+	--  positioned by hand.  Recomputed every frame rather than once, so it stays
+	--  glued to its selector while the page scrolls - that is the "the dropdown
+	--  stays behind when I scroll" report.  The same routine keeps the popup
+	--  inside the window and follows a window drag.
+	local scroller = enclosingScroller(anchor)
+	local function reposition()
+		local absAnchor = anchor.AbsolutePosition
+		local absRoot = root.AbsolutePosition
+		local x = absAnchor.X - absRoot.X
+		local y = absAnchor.Y - absRoot.Y + anchor.AbsoluteSize.Y + 4
+		local maxX = root.AbsoluteSize.X - width
+		local maxY = root.AbsoluteSize.Y - height
+		if x > maxX then x = maxX end
+		if x < 0 then x = 0 end
+		if y > maxY then y = maxY end
+		if y < 0 then y = 0 end
+		popup.Position = UDim2.fromOffset(x, y)
+	end
+	reposition()
 
 	--  Click shield.  The popup itself is a plain Frame and the gaps between
 	--  the option rows (plus the few pixels of padding around the list) are not
@@ -1197,12 +1253,42 @@ local function openPopup(ctx, anchor, width, height, builder)
 	})
 
 	local closed = false
+	local tracker
 	local function close()
 		if closed then return end
 		closed = true
+		if tracker then
+			tracker:Disconnect()
+			tracker = nil
+		end
 		if catcher and catcher.Parent then catcher:Destroy() end
 		if popup and popup.Parent then popup:Destroy() end
 		if ctx.popup and ctx.popup.close == close then ctx.popup = nil end
+	end
+
+	--  Follow the anchor every frame: this is what keeps the popup attached to
+	--  its row while the page scrolls (or the window is dragged) and dismisses
+	--  it once the row scrolled out of view or its page was rebuilt / switched.
+	local function track()
+		if closed then return end
+		if not (anchor and anchor.Parent) then
+			close()
+			return
+		end
+		if not anchorInView(anchor, scroller) then
+			close()
+			return
+		end
+		reposition()
+	end
+	if RunService then
+		--  RenderStepped is client-only (this is a client UI); fall back to
+		--  Heartbeat should it ever be unavailable.
+		local ok, connection = pcall(function() return RunService.RenderStepped:Connect(track) end)
+		if not ok then
+			ok, connection = pcall(function() return RunService.Heartbeat:Connect(track) end)
+		end
+		if ok then tracker = connection end
 	end
 
 	catcher.MouseButton1Click:Connect(close)
@@ -1307,7 +1393,10 @@ function builders.Dropdown(container, ctx, opts)
 		elseif #selected == 1 then
 			label.Text = selected[1]
 		else
-			label.Text = multi and "Various" or selected[1]
+			--  Multi-select: show how many options are ticked ("3 selected")
+			--  instead of the old "Various", and fall back to the first option
+			--  for a single-selection list.
+			label.Text = multi and (#selected .. " selected") or selected[1]
 		end
 		--  the selector is narrow, so the caption is fitted (never clipped)
 		fitLabel(label, boxWidth - 28, { MaxSize = 13, MinSize = 9 })
@@ -1878,6 +1967,86 @@ function builders.ColorPicker(container, ctx, opts)
 			render()
 		end)
 
+		--  Favourite colour slots (shared 3x3 palette) -------------------
+		--  Clicking an empty slot stores the current colour; clicking a filled
+		--  slot applies it back to the picker; Shift+click overwrites a filled
+		--  slot with the current colour and right-click clears it.  The palette
+		--  is shared by every picker and saved with the configuration.
+		local slotSize, slotGap = 18, 6
+		local slotOriginX, slotOriginY = 190, 24
+		local slotFill = {}
+		local function renderSlots()
+			for i = 1, FAVORITE_SLOTS do
+				local saved = XClient.FavoriteColors[i]
+				local fillFrame = slotFill[i]
+				if fillFrame then
+					if typeof(saved) == "Color3" then
+						fillFrame.BackgroundColor3 = saved
+						fillFrame.Visible = true
+					else
+						fillFrame.Visible = false
+					end
+				end
+			end
+		end
+		newText({
+			Name = "FavoritesTitle",
+			Text = "SAVED",
+			Font = THEME_FONT_BOLD,
+			TextSize = 10,
+			TextColor3 = theme.TextDim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Size = UDim2.fromOffset(slotSize * 3 + slotGap * 2, 12),
+			Position = UDim2.fromOffset(slotOriginX, 8),
+			Parent = popup,
+		})
+		for i = 1, FAVORITE_SLOTS do
+			local col = (i - 1) % 3
+			local row = math.floor((i - 1) / 3)
+			local slot = create("TextButton", {
+				Name = "Favorite" .. i,
+				Text = "",
+				AutoButtonColor = false,
+				BackgroundColor3 = theme.Surface,
+				Size = UDim2.fromOffset(slotSize, slotSize),
+				Position = UDim2.fromOffset(slotOriginX + col * (slotSize + slotGap), slotOriginY + row * (slotSize + slotGap)),
+				Parent = popup,
+			})
+			addCorner(slot, UDim.new(0, 4))
+			addStroke(slot, theme.StrokeSoft, 1, 0)
+			local fillFrame = newFrame({
+				Name = "Fill",
+				BackgroundColor3 = theme.Surface,
+				Size = UDim2.new(1, -4, 1, -4),
+				Position = UDim2.fromOffset(2, 2),
+				Visible = false,
+				Parent = slot,
+			})
+			addCorner(fillFrame, UDim.new(0, 3))
+			slotFill[i] = fillFrame
+
+			slot.MouseButton1Click:Connect(function()
+				local saved = XClient.FavoriteColors[i]
+				if typeof(saved) == "Color3" then
+					local overwriting = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+						or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+					if not overwriting then
+						api:Set(saved)
+						return
+					end
+				end
+				XClient.FavoriteColors[i] = color
+				renderSlots()
+				ctx.saveConfiguration()
+			end)
+			slot.MouseButton2Click:Connect(function()
+				XClient.FavoriteColors[i] = nil
+				renderSlots()
+				ctx.saveConfiguration()
+			end)
+		end
+		renderSlots()
+
 		--  Dragging ----------------------------------------------------
 		local function updateSv(x, y)
 			local relX = math.clamp((x - sv.AbsolutePosition.X) / math.max(sv.AbsoluteSize.X, 1), 0, 1)
@@ -1912,14 +2081,20 @@ function builders.ColorPicker(container, ctx, opts)
 
 		sv.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-				updateSv(input.Position.X, input.Position.Y)
+				--  Read the cursor from GetMouseLocation (the same source the drag
+				--  uses) instead of input.Position.  input.Position for the mouse
+				--  is shifted by the topbar inset, so the first click landed the
+				--  marker ~36px below the actual cursor.
+				local pos = UserInputService:GetMouseLocation()
+				updateSv(pos.X, pos.Y)
 				drag(updateSv)
 			end
 		end)
 
 		hueBar.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-				updateHue(input.Position.X)
+				local pos = UserInputService:GetMouseLocation()
+				updateHue(pos.X)
 				drag(function(x)
 					updateHue(x)
 				end)
@@ -1935,7 +2110,7 @@ function builders.ColorPicker(container, ctx, opts)
 			return
 		end
 		ctx.closePopup()
-		openPopup(ctx, swatch, 190, 184, function(popupFrame)
+		openPopup(ctx, swatch, 266, 184, function(popupFrame)
 			buildPopup(popupFrame)
 		end)
 	end)
@@ -4095,11 +4270,16 @@ local notificationQueue = {}
 
 local configState = {
 	enabled = false,
+	autoSave = true,
 	loaded = false,
 	fileName = nil,
 	folder = CONFIG_ROOT .. "/Configurations",
 	disabledNotified = false,
 }
+
+--  The in-menu "auto-save" switch is remembered in its own tiny file, because
+--  once auto-saving is turned off the configuration file is no longer written.
+local PREFERENCES_FILE = CONFIG_ROOT .. "/Preferences" .. CONFIG_EXTENSION
 
 local function filesystemAvailable()
 	return type(writefile) == "function"
@@ -4134,6 +4314,35 @@ local function unpackColor(value)
 	return Color3.fromRGB(tonumber(value.R) or 255, tonumber(value.G) or 255, tonumber(value.B) or 255)
 end
 
+--  User preferences (currently just the auto-save switch) ------------------
+local function readPreferences()
+	if not filesystemAvailable() or not HttpService then return nil end
+	if not isfile(PREFERENCES_FILE) then return nil end
+	local ok, contents = pcall(readfile, PREFERENCES_FILE)
+	if not ok or not contents or contents == "" then return nil end
+	local ok2, data = pcall(function() return HttpService:JSONDecode(contents) end)
+	if ok2 and type(data) == "table" then return data end
+	return nil
+end
+
+local function writePreferences()
+	if not filesystemAvailable() or not HttpService then return false end
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode({ AutoSave = configState.autoSave and true or false })
+	end)
+	if not ok or not encoded then return false end
+	ensureFolder(CONFIG_ROOT)
+	return pcall(writefile, PREFERENCES_FILE, encoded)
+end
+
+--  Whether the auto-saved configuration file already exists on disk.
+local function configFileExists()
+	if not filesystemAvailable() or not configState.fileName then return false end
+	local path = configState.folder .. "/" .. configState.fileName .. CONFIG_EXTENSION
+	if isfile(path) then return true end
+	return isfile(LEGACY_CONFIG_ROOT .. "/Configurations/" .. configState.fileName .. CONFIG_EXTENSION)
+end
+
 --  Collects the current state of every registered flag.
 local function serializeFlags()
 	local data = {}
@@ -4163,12 +4372,29 @@ local function serializeFlags()
 			end
 		end
 	end
+	--  The shared favourite colour palette rides along under a reserved key so
+	--  it survives a rejoin exactly like any flagged element.
+	local favorites = {}
+	for i = 1, FAVORITE_SLOTS do
+		local entry = XClient.FavoriteColors[i]
+		favorites[i] = (typeof(entry) == "Color3") and packColor(entry) or false
+	end
+	data.__favorite_colors = favorites
 	return data
 end
 
 --  Applies a decoded configuration table onto the live elements.
 local function applyFlags(data)
 	if type(data) ~= "table" then return false end
+	--  Restore the shared favourite colour palette first, then the elements.
+	local favorites = XClient.FavoriteColors
+	for i = #favorites, 1, -1 do favorites[i] = nil end
+	if type(data.__favorite_colors) == "table" then
+		for i = 1, FAVORITE_SLOTS do
+			local entry = data.__favorite_colors[i]
+			if type(entry) == "table" then favorites[i] = unpackColor(entry) end
+		end
+	end
 	local changed = false
 	for flag, element in pairs(XClient.Flags) do
 		local value = data[flag]
@@ -4226,6 +4452,23 @@ local function saveConfiguration()
 	if not encoded then return false end
 	ensureFolder(configState.folder)
 	return pcall(writefile, configState.folder .. "/" .. configState.fileName .. CONFIG_EXTENSION, encoded)
+end
+
+--  Debounced auto-save used by every element setter (ctx.saveConfiguration).
+--  It coalesces the flurry of changes a slider drag produces into a single
+--  write a fraction of a second later and honours the in-menu auto-save switch
+--  (configState.autoSave).  Explicit saves go through saveConfiguration above.
+local autoSaveScheduled = false
+local function requestAutoSave()
+	if not configState.enabled or not configState.autoSave or not configState.loaded then return false end
+	if not configState.fileName or not filesystemAvailable() then return false end
+	if autoSaveScheduled then return true end
+	autoSaveScheduled = true
+	task.delay(0.4, function()
+		autoSaveScheduled = false
+		saveConfiguration()
+	end)
+	return true
 end
 
 --  Autoload performed right after CreateWindow (same behaviour as before).
@@ -4383,11 +4626,24 @@ function XClient:CreateWindow(settings)
 	end
 
 	--  Configuration saving --------------------------------------------
+	--  Auto-save is on by default: the interface keeps a running "autocfg"
+	--  file so the menu comes back exactly as it was left last session.  Pass
+	--  ConfigurationSaving = { Enabled = false } to opt out again.
 	if type(settings.ConfigurationSaving) == "table" then
 		local cfg = settings.ConfigurationSaving
 		configState.enabled = cfg.Enabled and true or false
-		configState.fileName = cfg.FileName or "XClient"
+		configState.fileName = cfg.FileName or "autocfg"
 		configState.folder = cfg.FolderName and tostring(cfg.FolderName) or (CONFIG_ROOT .. "/Configurations")
+	else
+		configState.enabled = true
+		configState.fileName = "autocfg"
+		configState.folder = CONFIG_ROOT .. "/Configurations"
+	end
+	--  The in-menu auto-save switch is remembered in its own preferences file,
+	--  so it still works as a user choice even while saving is switched off.
+	local storedPreferences = readPreferences()
+	if storedPreferences and storedPreferences.AutoSave ~= nil then
+		configState.autoSave = storedPreferences.AutoSave and true or false
 	end
 
 	--  Window frame ----------------------------------------------------
@@ -4494,7 +4750,7 @@ function XClient:CreateWindow(settings)
 		connections = {},
 		popup = nil,
 		theme = function() return currentTheme end,
-		saveConfiguration = function() saveConfiguration() end,
+		saveConfiguration = function() requestAutoSave() end,
 		--  width available to a module row (used to fit captions); the flyout
 		--  swaps this for its own narrower width while it is being populated
 		rowWidth = WINDOW_WIDTH - RAIL_WIDTH - 26,
@@ -4572,6 +4828,8 @@ function XClient:CreateWindow(settings)
 		if not flyoutOpen then return end
 		flyoutOpen = false
 		settingsTarget = nil
+		--  Any dropdown / colour picker opened inside the flyout must go too.
+		ctx.closePopup()
 		tween(flyout, 0.16, { Position = UDim2.fromOffset(-(PANEL_WIDTH + PANEL_GAP), 0) })
 		task.delay(0.18, function()
 			if not flyoutOpen and flyout and flyout.Parent then
@@ -4582,6 +4840,7 @@ function XClient:CreateWindow(settings)
 
 	local function openFlyout(heading, populate)
 		flyoutBody:ClearAllChildren()
+		ctx.closePopup()
 		addList(flyoutBody, { Padding = UDim.new(0, 6) })
 		flyoutTitle.Text = tostring(heading or "Settings")
 		fitLabel(flyoutTitle, PANEL_WIDTH - 46, { MinSize = 10 })
@@ -4752,6 +5011,33 @@ function XClient:CreateWindow(settings)
 			CurrentValue = configName,
 			PlaceholderText = "Config name",
 			Callback = function(text) configName = text end,
+		})
+
+		--  Auto-save switch.  While it is on the reserved "autocfg" file is
+		--  rewritten (debounced) whenever an element changes, so the menu comes
+		--  back exactly as it was left.  Turn it off to keep only the manual,
+		--  named configurations.  The switch itself is remembered in
+		--  XClient/Preferences.rfld so it survives while auto-save is off.
+		builders.Toggle(container, ctx, {
+			Name = "Auto-save (autocfg)",
+			Description = "Remember the menu automatically between sessions",
+			CurrentValue = configState.autoSave,
+			Callback = function(state)
+				configState.autoSave = state and true or false
+				writePreferences()
+				if configState.autoSave then
+					saveConfiguration()
+					XClient:Notify({
+						Title = "XClient Configurations",
+						Content = "Auto-save enabled - the menu now remembers its state as '" .. tostring(configState.fileName or "autocfg") .. "'.",
+					})
+				else
+					XClient:Notify({
+						Title = "XClient Configurations",
+						Content = "Auto-save disabled - use Save / Load for named configurations.",
+					})
+				end
+			end,
 		})
 
 		builders.Button(container, ctx, {
@@ -5000,7 +5286,11 @@ function XClient:CreateWindow(settings)
 	local function setVisible(state)
 		visible = state and true or false
 		root.Visible = visible
-		if not visible then closeFlyout() end
+		if not visible then
+			--  Popups live on the window, so dismiss any open one with it.
+			ctx.closePopup()
+			closeFlyout()
+		end
 	end
 	ctx.setVisible = setVisible
 	ctx.isVisible = function() return visible end
@@ -5354,6 +5644,15 @@ function XClient:CreateWindow(settings)
 		function tab:CreateToggle(settings) return addRecord({ type = "Toggle", opts = settings or {} }) end
 		function tab:CreateSlider(settings) return addRecord({ type = "Slider", opts = settings or {} }) end
 		function tab:CreateDropdown(settings) return addRecord({ type = "Dropdown", opts = settings or {} }) end
+		--  Multi-select dropdown: a CreateDropdown with MultipleOptions forced
+		--  on, so the list stays open while several options are ticked and the
+		--  selector shows the number of selected entries.
+		function tab:CreateMultiDropdown(settings)
+			settings = settings or {}
+			settings.MultipleOptions = true
+			settings.Multi = true
+			return addRecord({ type = "Dropdown", opts = settings })
+		end
 		function tab:CreateInput(settings) return addRecord({ type = "Input", opts = settings or {} }) end
 		function tab:CreateKeybind(settings) return addRecord({ type = "Keybind", opts = settings or {} }) end
 		function tab:CreateColorPicker(settings) return addRecord({ type = "ColorPicker", opts = settings or {} }) end
@@ -5765,12 +6064,17 @@ function XClient:CreateWindow(settings)
 		return true
 	end
 
-	--  Autoload the saved configuration once the script finished building.
+	--  Autoload the saved configuration once the script finished building and
+	--  create the auto-save file on the first run, so the menu starts
+	--  remembering its state right away.
 	configState.loaded = true
 	task.delay(1, function()
 		if configState.enabled and not configState.autoLoaded then
 			configState.autoLoaded = true
 			loadConfiguration()
+			if configState.autoSave and not configFileExists() then
+				saveConfiguration()
+			end
 		end
 	end)
 
@@ -5809,6 +6113,59 @@ end
 
 function XClient:ListConfigurations()
 	return listConfigurations()
+end
+
+--  Favourite colours ------------------------------------------------------
+--  Shared palette rendered to the right of every colour picker (3x3 grid).
+--    XClient:SetFavoriteColor(index, Color3)   -- index 1 .. XClient.FavoriteSlots
+--    XClient:GetFavoriteColor(index) -> Color3?
+--    XClient:GetFavoriteColors()      -> array
+--    XClient:ClearFavoriteColor(index)
+--  The palette is stored inside the configuration (reserved key
+--  __favorite_colors) and auto-saved like any other element.
+function XClient:GetFavoriteColor(index)
+	index = tonumber(index)
+	if not index then return nil end
+	return XClient.FavoriteColors[index]
+end
+
+function XClient:GetFavoriteColors()
+	local out = {}
+	for i = 1, FAVORITE_SLOTS do out[i] = XClient.FavoriteColors[i] end
+	return out
+end
+
+function XClient:SetFavoriteColor(index, color)
+	index = tonumber(index)
+	if not index or index < 1 or index > FAVORITE_SLOTS then return false end
+	if typeof(color) ~= "Color3" then return false end
+	XClient.FavoriteColors[index] = color
+	requestAutoSave()
+	return true
+end
+
+function XClient:ClearFavoriteColor(index)
+	index = tonumber(index)
+	if not index or index < 1 or index > FAVORITE_SLOTS then return false end
+	XClient.FavoriteColors[index] = nil
+	requestAutoSave()
+	return true
+end
+
+--  Auto-save --------------------------------------------------------------
+--  XClient:SetAutoSave(false) keeps the menu from overwriting its stored
+--  state while leaving the manual Save / Load panel fully usable.
+function XClient:SetAutoSave(state)
+	configState.autoSave = state and true or false
+	writePreferences()
+	if configState.autoSave then
+		saveConfiguration()
+	end
+	return configState.autoSave
+end
+
+function XClient:GetAutoSave()
+	return configState.autoSave
 end
 
 --  Font ------------------------------------------------------------------

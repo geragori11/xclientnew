@@ -132,6 +132,25 @@ Tab:CreateDropdown({
 -- returned: .CurrentOption (array), .Options, :Set(value), :Refresh(newOptions)
 ```
 
+### CreateMultiDropdown
+The multi-select list is the same (`MultipleOptions = true`); `CreateMultiDropdown`
+just turns it on for you and the selector shows how many entries are ticked
+(`"3 selected"`). The list stays open while you toggle entries.
+
+```lua
+Tab:CreateMultiDropdown({
+	Name = "ESP parts",
+	Options = { "Head", "Torso", "Arms", "Legs" },
+	CurrentOption = { "Torso" },   -- array of selected names
+	Flag = "espParts",
+	Callback = function(options) end,
+})
+-- returned: .CurrentOption (array), .Options, :Set(value), :Refresh(newOptions)
+```
+
+Dropdown lists keep up with the row while the page is scrolled (and close once
+the row scrolls out of view, the tab is switched or a rebuild happens).
+
 ### CreateInput
 ```lua
 Tab:CreateInput({
@@ -170,7 +189,26 @@ Tab:CreateColorPicker({
 -- returned: .Color, :Set(color3), :SetSilent(color3)
 ```
 The row shows a swatch; clicking it opens a hue / saturation-value popup with a
-hex field.
+hex field. The popup is **wider** than before and carries a 3x3 grid of
+**favourite colour slots** (9 slots) to the right of the picker:
+
+| Action on a slot | Result |
+| --- | --- |
+| Left click, empty slot | store the current colour |
+| Left click, filled slot | apply the stored colour to the picker |
+| Shift + left click, filled slot | overwrite the slot with the current colour |
+| Right click | clear the slot |
+
+The palette is shared by every picker, saved with the configuration under the
+reserved key `__favorite_colors` and can also be driven from code:
+
+```lua
+XClient.FavoriteSlots                       -- 9
+XClient:GetFavoriteColor(1)                 -- Color3 or nil
+XClient:GetFavoriteColors()                 -- array of 9 (holes allowed)
+XClient:SetFavoriteColor(1, Color3.fromRGB(255, 0, 0))
+XClient:ClearFavoriteColor(1)
+```
 
 ### CreateLabel
 ```lua
@@ -235,10 +273,20 @@ XClient.Flags["aimbot"]:Set(true)    -- same as Toggle:Set(true)
 * Files live in `XClient/Configurations/<FileName>.rfld`
   (`FolderName` replaces `XClient/Configurations` entirely).
 * Format: a flat `{ "Flag": value, ... }` map — booleans, numbers, strings,
-  arrays for dropdowns and `{R, G, B}` (0-255) for colour pickers.
-* The file named in `ConfigurationSaving` is loaded automatically right after
-  `CreateWindow`; call `XClient:LoadConfiguration()` to force it manually.
-* Everything is written again whenever a flagged element changes.
+  arrays for dropdowns and `{R, G, B}` (0-255) for colour pickers. The shared
+  favourite-colour palette is stored under the reserved key `__favorite_colors`.
+* **Auto-save is on by default.** `CreateWindow` keeps a running configuration in
+  `XClient/Configurations/autocfg.rfld`: it is created on the first run and
+  loaded right after `CreateWindow`, so the menu comes back exactly as it was
+  left. Pass a `ConfigurationSaving` table to pick another file, or
+  `ConfigurationSaving = { Enabled = false }` to opt out.
+* Every flagged element change (toggle, slider, dropdown, colour picker, input,
+  keybind and the extended widgets) is written back automatically, debounced by
+  roughly 0.4 s so a slider drag only writes once.
+* The in-menu switch *Settings → Configuration → Auto-save (autocfg)* turns the
+  automatic writes off/on. That choice is remembered on its own in
+  `XClient/Preferences.rfld`, so it survives while auto-save is off; the manual
+  named configuration buttons keep working either way.
 * Configurations saved by the previous interface are read from the old
   `Configurations` folder too, and their exact value shape is understood.
 
@@ -249,11 +297,13 @@ XClient:SaveConfigurationAs("PvP")     -- named snapshot
 XClient:LoadConfigurationAs("PvP")
 XClient:DeleteConfiguration("PvP")
 XClient:ListConfigurations()           -- { "PvP", "Legit", ... }
+XClient:SetAutoSave(false)             -- stop the automatic writes
+XClient:GetAutoSave()                  -- current auto-save switch
 ```
 
-The topbar gear opens the built-in panel: theme picker, save / load / delete for
-the named configuration, the list of saved configurations and the interface
-keybind.
+The topbar gear opens the built-in panel: theme picker, the auto-save switch,
+save / load / delete for the named configuration, the list of saved
+configurations and the interface keybind.
 
 ---
 
