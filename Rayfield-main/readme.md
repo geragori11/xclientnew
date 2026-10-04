@@ -22,8 +22,9 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   saturation pads). Click an empty slot to store the current colour, click a
   filled one to apply it, Shift+click to overwrite, right-click to clear. The
   palette is shared by every picker and saved with the configuration.
-* **Extended widgets** — an interactive `PlayerWidget` character, a marker
-  `Image` (skin visualisation), a crosshair/FOV pad, a live graph, a
+* **Extended widgets** — an interactive `PlayerWidget` character, a real 3D
+  `AvatarPreview` (drag to orbit, scroll to zoom, ESP style neon highlights), a
+  marker `Image` (skin visualisation), a crosshair/FOV pad, a live graph, a
   progress/loader, a stepper, segments, a wheel, an analog stick, a radar and
   chips. All of them also work inside a module's settings flyout.
 * **CS style HUD font** by default (condensed), plus `Classic` / `Mono`
@@ -44,9 +45,9 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   fades out once the interface is up; the window itself slides into place.
 * **Per module gear** — give a row a `Settings = { ... }` table and a gear icon
   appears; **left click** slides the full height settings flyout in from the
-  **left** of the window, **right click** opens a compact auto-height popup in
-  the same spot (it hugs its rows and scrolls once they no longer fit). Both are
-  built from the same element builders and saved like any other flag.
+  **left** of the window (with a stacked slider layout — caption above a full
+  width track). The flyout is built from the same element builders and saved like
+  any other flag; right clicking the gear does nothing.
 * **Built-in configuration system** — **auto-save is on by default** (a running
   `autocfg` file is created and reloaded on the next join), plus
   save / load / delete / list named configurations and autoload on start, in the
@@ -89,6 +90,11 @@ Tab:CreateToggle({
 
 local Skin = Tab:CreatePlayerWidget({ Name = "Skin", Flag = "skin" })
 Skin.Highlight.Torso = true               -- the picture reacts immediately
+
+-- A real 3D avatar: drag to orbit, scroll to zoom, ESP style highlights.
+local Avatar = Tab:CreateAvatarPreview({ Name = "Target", Flag = "target" })
+Avatar.Highlight.Torso = true             -- the body part turns neon
+Avatar:SetTarget(Players.LocalPlayer)     -- swap in the real character
 
 XClient:Notify({ Title = "Loaded", Content = "Have fun." })
 ```

@@ -14,8 +14,9 @@
 		OpenKey = "K"         -- default key that shows / hides the menu
 		LoadingTitle/LoadingDuration -- the boot animation of the window
 
-	The extended widgets (PlayerWidget, Image, Crosshair, Graph, Progress,
-	Stepper, Segment, Wheel, Analog, Radar, Chips) are shown further down.
+	The extended widgets (PlayerWidget, AvatarPreview, Image, Crosshair, Graph,
+	Progress, Stepper, Segment, Wheel, Analog, Radar, Chips) are shown further
+	down.
 =========================================================================]]
 
 -- 1. load the library -------------------------------------------------------
@@ -278,6 +279,21 @@ local Picture = SecondTab:CreateImage({
 Picture.Marker.Torso = true
 Picture:SetMarker("Head", Color3.fromRGB(255, 90, 90))
 Picture:SetTint(Color3.fromRGB(210, 225, 255))
+
+--  a real 3D avatar in a ViewportFrame: drag to orbit, scroll to zoom and the
+--  same live Highlight / Skin variables as PlayerWidget (ESP style neon tint)
+local Avatar = SecondTab:CreateAvatarPreview({
+	Name = "Target avatar",
+	Description = "Drag to orbit, scroll to zoom",
+	Flag = "TargetAvatar",
+	Selected = { "Torso" },
+	Skin = { Head = Color3.fromRGB(240, 200, 120) },
+})
+Avatar.Highlight["left arm"] = true             -- the part turns neon
+Avatar:Rotate(20, -8)                           -- nudge the camera
+Avatar:SetZoom(0.85)
+--  Avatar:SetTarget(Players.LocalPlayer)        -- swap in the real character
+--  Avatar:SetUserId(1)                          -- or any UserId
 
 --  crosshair / FOV pad (drag the dot inside the pad)
 local Crosshair = SecondTab:CreateCrosshair({ Name = "Aim FOV", Flag = "AimFOV", FOV = 90, MaxFOV = 360 })

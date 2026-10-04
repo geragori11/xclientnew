@@ -268,14 +268,15 @@ A Neverlose style card that holds other elements — see **section 18**.
 ## 5. Per module settings (the gear button)
 
 Give any element a non-empty `Settings` table and a gear appears on the right of
-its row. The gear has two modes:
+its row. **Left click** slides the full height settings flyout in from the
+**left** of the window — as tall as the window, scrolling if the rows do not fit.
+(The flyout replaces what used to be a second, compact panel; right clicking the
+gear now does nothing.) The topbar gear opens the same full height panel.
 
-* **Left click** slides the full height settings flyout in from the **left** of
-  the window — as tall as the window, scrolling if the rows do not fit.
-* **Right click** opens the **compact** panel in the same spot: it hugs its rows
-  and only grows up to ~300px, past which its body scrolls. A short module's
-  settings therefore take up much less of the screen. The topbar gear always
-  keeps the full height panel.
+The panel is wider than it looks: rows get a **stacked slider layout** — the
+caption sits on its own line above a full width track, with the value read-out
+on the caption line — so a long module name can never end up underneath the
+slider's read-out.
 
 Both are built from the same element builders:
 
@@ -309,8 +310,9 @@ Every open rebuilds the rows from scratch. That rebuild is leak-free — the
 instances, the signal connections and the input handlers are all released again
 when the panel closes; `_devtest.lua` section 26 proves it for the full flyout
 by opening and closing the panel a hundred times and comparing the counters, and
-section 27 does the same for the compact popup (connections `+0`, instances
-`+0`, input handlers `+0`). So if a menu starts lagging after a
+section 27 does the same for the reopened gear panel (connections `+0`,
+instances `+0`, input handlers `+0`) while also checking that right clicking a
+gear is a no-op. So if a menu starts lagging after a
 while in a live game, measure before changing the layout: `_leakcheck.lua` prints
 the connection / object counts over time, and the row that keeps growing names
 the culprit (the interface, the game script's own loops, or a loop restarted on
@@ -453,6 +455,7 @@ Elements added on top of the previous interface (all backwards compatible):
 | Element | Create call | Section |
 | --- | --- | --- |
 | PlayerWidget | `Tab:CreatePlayerWidget` | 16.1 |
+| AvatarPreview (3D) | `Tab:CreateAvatarPreview` | 16.13 |
 | Image with markers | `Tab:CreateImage` | 16.2 |
 | Crosshair / FOV pad | `Tab:CreateCrosshair` | 16.3 |
 | Graph | `Tab:CreateGraph` | 16.4 |
@@ -634,9 +637,10 @@ local Window = XClient:CreateWindow({
 Every widget below follows the same contract as the classic elements: it is
 created on a tab, returns the settings table, supports `Flag`, `Description`,
 `Settings` (the gear flyout) and `:Set(...)`, and it can be used inside a module's
-`Settings` list — so a viewer such as **PlayerWidget** can be the skin preview of
-a module. Each of them also defines `:Serialize()` / `:Set(value)` for the
-configuration system; a different element type is saved back in the same `.rfld`.
+`Settings` list — so a viewer such as **PlayerWidget** or the 3D
+**AvatarPreview** can be the skin preview of a module. Each of them also defines
+`:Serialize()` / `:Set(value)` for the configuration system; a different element
+type is saved back in the same `.rfld`.
 
 ### 16.1 PlayerWidget — interactive character
 
@@ -862,13 +866,15 @@ local Aimbot = Tab:CreateToggle({
 ```
 
 Friendly aliases: `Tab:CreatePlayerPreview` (PlayerWidget),
-`Tab:CreateSkinPreview` (Image) and `Tab:CreateLoader` (Progress).
+`Tab:CreateAvatar` (AvatarPreview), `Tab:CreateSkinPreview` (Image) and
+`Tab:CreateLoader` (Progress).
 
 #### Configuration value shapes
 
 | Element | Saved value |
 | --- | --- |
 | PlayerWidget | array of highlighted regions, e.g. `["Head","Torso"]` |
+| AvatarPreview | array of highlighted regions (the camera is not saved) |
 | Image | array of marked region names |
 | Chips / Segment (`Multi`) | array of the selected options |
 | Segment (single) / Wheel | the selected option name |
@@ -880,6 +886,58 @@ Friendly aliases: `Tab:CreatePlayerPreview` (PlayerWidget),
 The widgets restore themselves through the same `:Set(value)` entry point the
 classic elements use, so `LoadConfiguration()` re-applies them without any extra
 code.
+
+### 16.13 AvatarPreview — real 3D avatar
+
+A real 3D character inside a `ViewportFrame` (`WorldModel` + `Camera`), not a
+picture: **drag to orbit, scroll to zoom**, and the same live `Highlight` /
+`Skin` variables `PlayerWidget` exposes. Highlighted parts get an **ESP style
+tint** — `Enum.Material.Neon` plus the theme accent colour.
+
+```lua
+local Avatar = Tab:CreateAvatarPreview({
+	Name = "Target",
+	Flag = "target",
+	Height = 210,                                  -- viewport height
+	Yaw = 24, Pitch = -12, Zoom = 1,               -- initial camera
+	Selected = { "Torso" },                        -- initial highlights
+	Skin = { Head = Color3.fromRGB(240, 200, 120) },
+	Callback = function(region, isOn, widget) end,
+})
+
+Avatar.Highlight.Torso = true      -- the part turns neon immediately
+Avatar.Highlight.All = false       -- back to the solid skin colour
+Avatar:Rotate(35, -12)             -- orbit (yaw, pitch in degrees)
+Avatar:SetZoom(0.8)                -- 0.45 (close) .. 2.4 (far)
+Avatar:ResetCamera()
+
+--  load a real avatar: a Player, a UserId or a Model
+Avatar:SetTarget(Players.LocalPlayer)   -- also watches CharacterAdded
+Avatar:SetUserId(1)
+Avatar:SetModel(Players.LocalPlayer.Character)
+```
+
+A blocky R6 stand-in is built straight away, so the widget always renders; an
+actual avatar replaces it once the client can fetch it (`SetTarget` /
+`SetUserId` go through `Players:CreateHumanoidModelFromUserId`, which is a no-op
+when the executor cannot provide it). `SetModel` maps an avatar's parts onto the
+six regions (R6 `"Left Arm"` and R15 `"LeftUpperArm"` / `"LeftUpperLeg"` alike).
+
+| Member | Description |
+| --- | --- |
+| `Avatar.Highlight` / `Avatar.Skin` | live tables, exactly like PlayerWidget |
+| `Avatar:SetRegion` / `:GetRegion` / `:SetSkin` / `:GetSkin` | per region access |
+| `Avatar:GetSelection()` / `:Serialize()` / `:Clear()` / `:Refresh()` | as PlayerWidget |
+| `Avatar:Rotate(deltaYaw, deltaPitch)` | orbit the camera |
+| `Avatar:SetZoom(factor)` / `:GetZoom()` | zoom in / out (clamped 0.45 – 2.4) |
+| `Avatar:GetYaw()` | current `yaw, pitch` |
+| `Avatar:ResetCamera()` | back to the `Yaw` / `Pitch` / `Zoom` options |
+| `Avatar:SetTarget(playerOrUserIdOrModel)` | load a real avatar |
+| `Avatar:SetUserId(userId)` / `Avatar:SetModel(model)` | explicit loaders |
+| `Avatar.Viewport` | the `ViewportFrame` itself |
+
+The configuration saves the highlighted region array — the camera angle is not
+persisted.
 
 ---
 
@@ -932,8 +990,8 @@ Edit `Loader.Config` at the top of `loader.lua`:
 | `VerifyCache` | `true` | `false` trusts the cached copy when the build tag cannot be read (old behaviour) |
 
 **Manual version, no API.** `version.txt` next to the library holds one short
-token, e.g. `1.6.0`. The very same token is declared inside the library as
-`XClient.Build = "1.6.0"`, so there are two things the loader can compare:
+token, e.g. `1.7.0`. The very same token is declared inside the library as
+`XClient.Build = "1.7.0"`, so there are two things the loader can compare:
 
 * the tag published on GitHub (`version.txt`, a few bytes from the same host
   that serves `xclient.lua`), and
@@ -980,7 +1038,7 @@ on disk and warns `the published file does not compile; using the copy on
 disk`. The only case that still fails is *nothing cached **and** the published
 file broken* — and then the error quotes the real parser message instead of
 claiming the repository was unreachable. That is what turns a bad push (a bare
-`XClient.Build = 1.6.0` without the quotes, say) into a non-event for everybody
+`XClient.Build = 1.7.0` without the quotes, say) into a non-event for everybody
 who already has a working copy.
 
 `Loader.Version` (`getgenv().XClientLoader.Version`) tells you which loader is
@@ -1016,7 +1074,7 @@ Loader:Load()              -- run the whole load sequence again
 getgenv().XClientLoader:ClearCache()                 -- true when something was removed
 local url = "URL_TO/loader.lua?t=" .. os.time()      -- also cache-bust the loader itself
 loadstring(game:HttpGet(url))()                      -- auto-run downloads the library again
-print(getgenv().XClient.Build)                       -- e.g. 1.6.0
+print(getgenv().XClient.Build)                       -- e.g. 1.7.0
 ```
 
 The same files can be deleted by hand, without the loader (paths are relative to

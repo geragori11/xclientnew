@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.8.0"
+XClient.Version = "1.7.0"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.8.0"
+XClient.Build = "1.7.0"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -857,10 +857,6 @@ local function newRow(container, ctx, opts)
 		gearButton.MouseButton1Click:Connect(function()
 			if ctx.toggleSettings then ctx.toggleSettings(base) end
 		end)
-		--  Right click opens the compact, auto height panel instead.
-		gearButton.MouseButton2Click:Connect(function()
-			if ctx.toggleCompactSettings then ctx.toggleCompactSettings(base) end
-		end)
 	end
 
 	fitRowText(base, base.rowWidth)
@@ -1053,6 +1049,12 @@ function builders.Slider(container, ctx, opts)
 	local SLIDER_VALUE_GAP = 14
 	local SLIDER_MIN_TRACK = 28
 	local SLIDER_MIN_CAPTION = 48        -- matches rowTextWidth's floor
+	--  Inside the settings flyout the slider is stacked: the caption sits on
+	--  its own line above a full width track (see below) so a long name can
+	--  never land under the value read-out.  The row grows to fit the second
+	--  line.  Any other container keeps the compact inline layout.
+	local SLIDER_STACKED_H = 62
+	local stacked = ctx.inSettingsPanel == true
 
 	--  The control is right aligned, so its width is capped by whatever the
 	--  caption (and the gear, when the row has one) leaves free.  Inside the
@@ -1111,19 +1113,50 @@ function builders.Slider(container, ctx, opts)
 	addCorner(knob, UDim.new(1, 0))
 	addStroke(knob, theme.Background, 2, 0)
 
-	-- position the slider control group (track + value box) at the right
+	-- position the slider control group (track + value box)
 	local controlWidth = width
-	fitControl(base, controlWidth)
-	local rightEdge = -(base.controlRight)
-	--  The whole control group (track + value box) is right aligned: the value
-	--  box hugs the row's right edge and the track sits one control width to
-	--  its left.  The track is inset on the left by the knob radius so the
-	--  knob's leftmost pixel never reaches into the caption band fitControl
-	--  just reserved.  Keep the offset negative so the slider is on screen.
-	track.Position = UDim2.new(1, rightEdge - controlWidth + SLIDER_KNOB_R, 0.5, 0)
-	valueBox.Position = UDim2.new(1, rightEdge, 0.5, 0)
-	--  keep long values (decimals, suffixes, "Infinity") inside the value box
-	fitLabel(valueBox, SLIDER_VALUE_W - 2, { MinSize = 9 })
+	if stacked then
+		--  Stacked layout (settings flyout): caption on top, full width track
+		--  underneath.  The value read-out stays on the first line, right
+		--  aligned, and the track spans the row so a "1 to 100" range reads
+		--  clearly instead of being squeezed between label and value.
+		local stackedHeight = math.max(SLIDER_STACKED_H, base.rowHeight or ROW_HEIGHT)
+		base.row.Size = UDim2.new(1, 0, 0, stackedHeight)
+		base.rowHeight = stackedHeight
+		base.controlWidth = 0
+		base.controlRight = rightOffset
+		--  caption, top left, clear of the value read-out
+		base.title.TextYAlignment = Enum.TextYAlignment.Top
+		base.title.TextXAlignment = Enum.TextXAlignment.Left
+		base.title.Position = UDim2.new(0, base.titleX, 0, 7)
+		base.title.Size = UDim2.new(1, -(base.titleX + SLIDER_VALUE_W + 12), 0, 30)
+		fitLabel(base.title, rowWidth - (base.titleX + rightOffset + SLIDER_VALUE_W + 12), { MinSize = FONT_MIN_SIZE, Wrap = true })
+		if base.desc then
+			base.desc.Position = UDim2.new(0, base.titleX, 0, 24)
+			base.desc.Size = UDim2.new(1, -(base.titleX + SLIDER_VALUE_W + 12), 0, 12)
+		end
+		valueBox.Position = UDim2.new(1, -rightOffset, 0, 8)
+		valueBox.AnchorPoint = Vector2.new(1, 0)
+		--  track run: inset by the knob radius at both ends so the knob and
+		--  the fill behind it never reach into the row padding
+		trackWidth = math.max(SLIDER_MIN_TRACK, rowWidth - (base.titleX + rightOffset + SLIDER_KNOB_W))
+		track.AnchorPoint = Vector2.new(0, 0)
+		track.Size = UDim2.fromOffset(trackWidth, 10)
+		track.Position = UDim2.new(0, base.titleX + SLIDER_KNOB_R, 0, stackedHeight - 15)
+		fitLabel(valueBox, SLIDER_VALUE_W - 2, { MinSize = 9 })
+	else
+		fitControl(base, controlWidth)
+		local rightEdge = -(base.controlRight)
+		--  The whole control group (track + value box) is right aligned: the value
+		--  box hugs the row's right edge and the track sits one control width to
+		--  its left.  The track is inset on the left by the knob radius so the
+		--  knob's leftmost pixel never reaches into the caption band fitControl
+		--  just reserved.  Keep the offset negative so the slider is on screen.
+		track.Position = UDim2.new(1, rightEdge - controlWidth + SLIDER_KNOB_R, 0.5, 0)
+		valueBox.Position = UDim2.new(1, rightEdge, 0.5, 0)
+		--  keep long values (decimals, suffixes, "Infinity") inside the value box
+		fitLabel(valueBox, SLIDER_VALUE_W - 2, { MinSize = 9 })
+	end
 
 	--  Backwards compatible contract (see Toggle): the settings table handed in
 	--  by the caller IS the element that gets returned, so mySlider.CurrentValue,
@@ -3279,6 +3312,497 @@ function builders.PlayerWidget(container, ctx, opts)
 	registerFlag(ctx, opts, api.Selected, "PlayerWidget", api)
 	return api
 end
+--  AvatarPreview ----------------------------------------------------------
+--  A real 3D character inside a ViewportFrame: drag to orbit, scroll to
+--  zoom, and the same live Highlight / Skin variables PlayerWidget exposes -
+--  painted as an ESP style tint (neon material + colour) on the matching
+--  body part.  A blocky R6 stand-in is built straight away so the widget
+--  always renders; an actual avatar (a Player, a UserId or a Model) replaces
+--  it from the network when the client can fetch it.
+--      local avatar = Tab:CreateAvatarPreview({ Name = "Target", Flag = "t" })
+--      avatar.Highlight.Torso = true          -- avatar.Highlight.torso too
+--      avatar:SetTarget(Players.LocalPlayer)  -- load the real character
+--      avatar:Rotate(35, -12)  avatar:SetZoom(0.8)  avatar:ResetCamera()
+function builders.AvatarPreview(container, ctx, opts)
+	opts = normalizeOpts(opts)
+	local theme = ctx.theme()
+	local base, stage = widgetStage(container, ctx, opts, tonumber(opts.Height) or 210)
+
+	local api = opts
+	api.Type = "AvatarPreview"
+	api.Row = base.row
+	api.Base = base
+	api.Element = stage
+	api.Regions = {}
+	for index, region in ipairs(PLAYER_REGIONS) do api.Regions[index] = region end
+	--  grab the requested selection before api.Selected is replaced (api == opts)
+	local initialSelection = opts.Selected or opts.CurrentValue
+	api.Selected = {}
+
+	local allowMultiple = opts.AllowMultiple ~= false
+	local state = {}      -- region -> true
+	local colors = {}     -- region -> Color3
+	local partByName = {} -- region -> BasePart
+	local world           -- the WorldModel holding the current rig
+	local caption
+
+	local DEFAULT_SKIN = Color3.fromRGB(90, 130, 200)
+	local BASE_MATERIAL = Enum.Material.SmoothPlastic
+	local HIGHLIGHT_MATERIAL = Enum.Material.Neon
+
+	local function applySkinValue(name, color)
+		local target = canonicalRegion(name)
+		if target == "*" then
+			for _, region in ipairs(PLAYER_REGIONS) do colors[region] = color end
+		else
+			colors[target] = color
+		end
+	end
+	if opts.Skin ~= nil then
+		if typeof(opts.Skin) == "Color3" then
+			applySkinValue("*", opts.Skin)
+		elseif type(opts.Skin) == "table" then
+			for key, value in pairs(opts.Skin) do
+				if typeof(value) == "Color3" then applySkinValue(key, value) end
+			end
+		end
+	end
+	for _, region in ipairs(PLAYER_REGIONS) do
+		if colors[region] == nil then colors[region] = DEFAULT_SKIN end
+	end
+
+	--  Viewport + orbit camera -------------------------------------------
+	local viewport = create("ViewportFrame", {
+		Name = "Viewport",
+		BackgroundColor3 = theme.Surface,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, -12, 1, -28),
+		Position = UDim2.fromOffset(6, 6),
+		Parent = stage,
+	})
+	pcall(function()
+		viewport.Ambient = Color3.fromRGB(150, 150, 160)
+		viewport.LightColor = Color3.fromRGB(255, 255, 255)
+		viewport.LightDirection = Vector3.new(-0.4, -1, -0.6)
+	end)
+	addCorner(viewport, UDim.new(0, 6))
+	api.Viewport = viewport
+
+	local camera = create("Camera", { Name = "Camera", FieldOfView = 40 })
+	camera.Parent = viewport
+	viewport.CurrentCamera = camera
+
+	local yaw = tonumber(opts.Yaw) or 24
+	local pitch = tonumber(opts.Pitch) or -12
+	local zoomFactor = tonumber(opts.Zoom) or 1
+	local pivot = { x = 0, y = 0.6, z = 0 }
+	local BASE_DISTANCE = 9
+	local MIN_ZOOM, MAX_ZOOM = 0.45, 2.4
+
+	local function refreshCamera()
+		local distance = BASE_DISTANCE * zoomFactor
+		local ok = pcall(function()
+			camera.CFrame = CFrame.new(pivot.x, pivot.y, pivot.z)
+				* CFrame.Angles(0, math.rad(yaw), 0)
+				* CFrame.Angles(math.rad(pitch), 0, 0)
+				* CFrame.new(0, 0, distance)
+		end)
+		if not ok then
+			--  A client without a CFrame implementation still gets the rig,
+			--  it simply cannot be orbited.
+			pcall(function() camera.CFrame = CFrame.new(0, 0, distance) end)
+		end
+	end
+
+	--  Rig ---------------------------------------------------------------
+	--  Blocky R6 proportions (studs); the camera orbits the chest height.
+	--  Each spec is { x, y, z, width, height, depth }.
+	local PART_SPECS = {
+		Head     = { 0, 2.55, 0, 1.2, 1.2, 1.2 },
+		Torso    = { 0, 1, 0, 2, 2, 1 },
+		LeftArm  = { -1.5, 1, 0, 1, 2, 1 },
+		RightArm = { 1.5, 1, 0, 1, 2, 1 },
+		LeftLeg  = { -0.5, -1, 0, 1, 2, 1 },
+		RightLeg = { 0.5, -1, 0, 1, 2, 1 },
+	}
+
+	local function buildRig()
+		world = create("WorldModel", { Name = "World", Parent = viewport })
+		for _, region in ipairs(PLAYER_REGIONS) do
+			local spec = PART_SPECS[region]
+			local part = create("Part", {
+				Name = region,
+				Size = Vector3.new(spec[4], spec[5], spec[6]),
+				CFrame = CFrame.new(spec[1], spec[2], spec[3]),
+				Color = colors[region],
+				Material = BASE_MATERIAL,
+				Anchored = true,
+				CanCollide = false,
+				CastShadow = false,
+				Parent = world,
+			})
+			partByName[region] = part
+		end
+	end
+
+	local function clearRig()
+		for region in pairs(partByName) do partByName[region] = nil end
+		if world then pcall(function() world:Destroy() end) end
+		world = nil
+	end
+
+	--  Map an arbitrary avatar's parts onto the six canonical regions.  Names
+	--  are matched case / separator insensitively, so both R6 ("Left Arm")
+	--  and R15 ("LeftUpperArm", "LeftUpperLeg") limbs land on their region.
+	local function partRegion(partName)
+		local name = tostring(partName or ""):gsub("[%s_%-]", ""):lower()
+		if name == "head" then return "Head" end
+		if name == "torso" or name == "chest" or name == "uppertorso" or name == "lowertorso" or name == "humanoidrootpart" then
+			return "Torso"
+		end
+		local side = name:find("left", 1, true) and "Left" or (name:find("right", 1, true) and "Right" or nil)
+		if not side then return nil end
+		if name:find("arm", 1, true) then return side .. "Arm" end
+		if name:find("leg", 1, true) then return side .. "Leg" end
+		return nil
+	end
+
+	local function paint()
+		local selected = api.Selected
+		for index = #selected, 1, -1 do selected[index] = nil end
+		for _, region in ipairs(PLAYER_REGIONS) do
+			local on = state[region] and true or false
+			local part = partByName[region]
+			if part then
+				part.Color = on and theme.Accent or colors[region]
+				part.Material = on and HIGHLIGHT_MATERIAL or BASE_MATERIAL
+				part.Transparency = on and 0.05 or 0
+			end
+			if on then selected[#selected + 1] = region end
+		end
+		api.Selected = selected
+		api.CurrentValue = selected
+		api.Value = selected
+		if caption then
+			caption.Text = (#selected > 0)
+				and ("Highlighted: " .. table.concat(selected, ", "))
+				or "Drag to orbit, scroll to zoom"
+			fitLabel(caption, (tonumber(ctx.rowWidth) or ROW_WIDTH) - 24, { MaxSize = 11, MinSize = 9 })
+		end
+	end
+
+	--  Live variables: writing to them repaints the avatar straight away.
+	api.Highlight = reactiveWidgetTable(state, function(region, value)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = value and true or nil end
+		end
+		paint()
+	end)
+	api.Skin = reactiveWidgetTable(colors, function(region, value)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do colors[entry] = value end
+		end
+		paint()
+	end)
+
+	--  Swap the rig for a real avatar ------------------------------------
+	local function adoptModel(model)
+		if typeof(model) ~= "Instance" then return false end
+		if not model.Parent then pcall(function() model.Parent = workspace end) end
+		local parts = {}
+		local function consider(child)
+			local ok, isPart = pcall(function() return child:IsA("BasePart") end)
+			if not ok or not isPart then return end
+			local region = partRegion(child.Name)
+			if region and parts[region] == nil then parts[region] = child end
+		end
+		local humanoid
+		pcall(function() humanoid = model:FindFirstChildOfClass("Humanoid") end)
+		local ok, descendants = pcall(function()
+			if humanoid then
+				return model:GetChildren()
+			end
+			return model:GetDescendants()
+		end)
+		if ok and type(descendants) == "table" then
+			for _, child in ipairs(descendants) do consider(child) end
+		end
+		if not next(parts) then return false end
+		--  recentre the camera pivot on the model (numeric reads only, so a
+		--  harness without real Vector3 support simply keeps the default)
+		local minX, maxX = math.huge, -math.huge
+		local minY, maxY = math.huge, -math.huge
+		local minZ, maxZ = math.huge, -math.huge
+		for _, part in pairs(parts) do
+			local pok, position = pcall(function() return part.Position end)
+			if pok and position and type(position.X) == "number" then
+				minX = math.min(minX, position.X); maxX = math.max(maxX, position.X)
+				minY = math.min(minY, position.Y); maxY = math.max(maxY, position.Y)
+				minZ = math.min(minZ, position.Z); maxZ = math.max(maxZ, position.Z)
+			end
+		end
+		if minX ~= math.huge then
+			pivot.x = (minX + maxX) / 2
+			pivot.y = (minY + maxY) / 2
+			pivot.z = (minZ + maxZ) / 2
+		end
+		clearRig()
+		world = create("WorldModel", { Name = "World", Parent = viewport })
+		for region, source in pairs(parts) do
+			local cok, clone = pcall(function() return source:Clone() end)
+			if cok and typeof(clone) == "Instance" then
+				pcall(function()
+					clone.Anchored = true
+					clone.CanCollide = false
+					clone.CastShadow = false
+					clone.Parent = world
+				end)
+				partByName[region] = clone
+			end
+		end
+		refreshCamera()
+		paint()
+		return true
+	end
+
+	local function loadUserId(userId)
+		if type(userId) ~= "number" then return false end
+		if not (Players and type(Players.CreateHumanoidModelFromUserId) == "function") then return false end
+		local ok, result = pcall(function() return Players:CreateHumanoidModelFromUserId(userId) end)
+		if not ok or result == nil then return false end
+		local handler = function(model)
+			task.spawn(function() pcall(adoptModel, model) end)
+		end
+		if type(result.Once) == "function" then
+			result:Once(handler)
+		elseif type(result.Connect) == "function" then
+			result:Connect(handler)
+		else
+			return false
+		end
+		return true
+	end
+
+	buildRig()
+	refreshCamera()
+	caption = stageCaption(stage, "Drag to orbit, scroll to zoom", ctx)
+	paint()
+
+	function api:SetRegion(name, on)
+		local region = canonicalRegion(name)
+		if region == "*" then
+			for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = on and true or nil end
+		elseif PART_SPECS[region] then
+			if on and not allowMultiple then
+				for _, entry in ipairs(PLAYER_REGIONS) do state[entry] = nil end
+			end
+			state[region] = on and true or nil
+		end
+		paint()
+		return api
+	end
+
+	function api:GetRegion(name)
+		return state[canonicalRegion(name)] and true or false
+	end
+
+	function api:SetSkin(name, color)
+		applySkinValue(name, color)
+		paint()
+		return api
+	end
+
+	function api:GetSkin(name)
+		return colors[canonicalRegion(name)]
+	end
+
+	function api:GetSelection()
+		local copy = {}
+		for index, region in ipairs(api.Selected) do copy[index] = region end
+		return copy
+	end
+
+	function api:Clear()
+		for _, region in ipairs(PLAYER_REGIONS) do state[region] = nil end
+		paint()
+		return api
+	end
+
+	function api:Refresh()
+		paint()
+		return api
+	end
+
+	function api:Serialize()
+		return api:GetSelection()
+	end
+
+	--  :Set accepts the saved array, a single region name, or
+	--  { Regions = { ... } / Highlight = { ... }, Skin = { ... } }
+	function api:ApplyValue(value)
+		local list = value
+		if type(value) == "table" then
+			if value.Regions ~= nil then
+				list = value.Regions
+			elseif value.Highlight ~= nil then
+				list = value.Highlight
+			end
+			if type(value.Skin) == "table" then
+				for key, color in pairs(value.Skin) do
+					if typeof(color) == "Color3" then applySkinValue(key, color) end
+				end
+			end
+		end
+		if list ~= nil then
+			for _, region in ipairs(PLAYER_REGIONS) do state[region] = nil end
+			if type(list) == "string" then list = { list } end
+			if type(list) == "table" then
+				for key, entry in pairs(list) do
+					local name = type(key) == "number" and entry or key
+					local on = type(key) == "number" and true or (entry and true or false)
+					local region = canonicalRegion(name)
+					if region == "*" then
+						for _, item in ipairs(PLAYER_REGIONS) do state[item] = on and true or nil end
+					elseif PART_SPECS[region] then
+						state[region] = on and true or nil
+					end
+				end
+			end
+		end
+		paint()
+		return api
+	end
+
+	function api:SetSilent(value)
+		api:ApplyValue(value)
+		return api
+	end
+
+	function api:Set(value)
+		api:ApplyValue(value)
+		callSafe(opts.Callback, api:GetSelection(), nil, api)
+		ctx.saveConfiguration()
+		return api
+	end
+
+	--  Camera controls ----------------------------------------------------
+	function api:Rotate(deltaYaw, deltaPitch)
+		yaw = yaw + (tonumber(deltaYaw) or 0)
+		pitch = math.clamp(pitch + (tonumber(deltaPitch) or 0), -85, 85)
+		refreshCamera()
+		return api
+	end
+
+	function api:SetZoom(factor)
+		zoomFactor = math.clamp(tonumber(factor) or zoomFactor, MIN_ZOOM, MAX_ZOOM)
+		refreshCamera()
+		return api
+	end
+
+	function api:GetZoom()
+		return zoomFactor
+	end
+
+	function api:GetYaw()
+		return yaw, pitch
+	end
+
+	function api:ResetCamera()
+		yaw = tonumber(opts.Yaw) or 24
+		pitch = tonumber(opts.Pitch) or -12
+		zoomFactor = tonumber(opts.Zoom) or 1
+		pivot.x, pivot.y, pivot.z = 0, 0.6, 0
+		refreshCamera()
+		return api
+	end
+
+	--  Real avatar --------------------------------------------------------
+	function api:SetModel(model)
+		pcall(adoptModel, model)
+		return api
+	end
+
+	function api:SetUserId(userId)
+		loadUserId(userId)
+		return api
+	end
+
+	--  Points the preview at a Player, a UserId or a Model.
+	function api:SetTarget(target)
+		if type(target) == "number" then
+			api:SetUserId(target)
+			return api
+		end
+		if typeof(target) ~= "Instance" then
+			return api
+		end
+		local userId
+		pcall(function() userId = target.UserId end)
+		if type(userId) == "number" then
+			api:SetUserId(userId)
+			local characterAdded = target.CharacterAdded
+			if characterAdded and type(characterAdded.Connect) == "function" then
+				ctx.connections[#ctx.connections + 1] = characterAdded:Connect(function(character)
+					task.spawn(function() pcall(adoptModel, character) end)
+				end)
+			end
+			return api
+		end
+		api:SetModel(target)
+		return api
+	end
+
+	--  Input: drag to orbit, scroll to zoom.  The connections go through the
+	--  context bucket so a flyout can release them again (no leaks).
+	--  Wheel zoom only responds while the pointer is over the viewport, so
+	--  scrolling a long settings page does not swing the camera around.
+	local function pointerOverViewport()
+		local ok, mouse = pcall(function() return UserInputService:GetMouseLocation() end)
+		if not ok or not mouse then return false end
+		local position = viewport.AbsolutePosition
+		local size = viewport.AbsoluteSize
+		if not position or not size then return false end
+		local x, y = mouse.X, mouse.Y
+		if type(x) ~= "number" or type(y) ~= "number" then return false end
+		return x >= position.X and x <= position.X + size.X
+			and y >= position.Y and y <= position.Y + size.Y
+	end
+
+	local dragging = false
+	local lastX, lastY = 0, 0
+	viewport.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			local position = input.Position
+			lastX, lastY = position.X, position.Y
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			if input.UserInputType == Enum.UserInputType.MouseWheel and pointerOverViewport() then
+				local delta = input.Position and (input.Position.Z or 0) or 0
+				zoomFactor = math.clamp(zoomFactor - delta * 0.12, MIN_ZOOM, MAX_ZOOM)
+				refreshCamera()
+			end
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			local position = input.Position
+			api:Rotate((position.X - lastX) * 0.6, (position.Y - lastY) * -0.6)
+			lastX, lastY = position.X, position.Y
+		end
+	end)
+	ctx.connections[#ctx.connections + 1] = UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	api:ApplyValue(initialSelection)
+	registerFlag(ctx, opts, api.Selected, "AvatarPreview", api)
+	return api
+end
+
 --  Crosshair / FOV pad ----------------------------------------------------
 --      Tab:CreateCrosshair({ Name = "Aim FOV", Flag = "fov", FOV = 90,
 --          MaxFOV = 360, Dot = { X = 0.1, Y = -0.2 },
@@ -5112,14 +5636,11 @@ local WINDOW_WIDTH = 560
 local WINDOW_HEIGHT = 420
 local RAIL_WIDTH = 148
 local TOPBAR_HEIGHT = 36
-local PANEL_WIDTH = 210
+--  The settings flyout is deliberately roomy: its rows carry full width
+--  sliders (see the stacked layout in builders.Slider) whose caption sits on
+--  its own line, so the panel was widened 25% (210 -> 263) to give them room.
+local PANEL_WIDTH = 263
 local PANEL_GAP = 8
---  Compact settings popup.  Right clicking a module gear opens this instead
---  of the full height flyout: it is narrower, hugs its rows and stops growing
---  at COMPACT_MAX_HEIGHT (the body scrolls from there on).
-local COMPACT_WIDTH = 190
-local COMPACT_MAX_HEIGHT = 300
-local COMPACT_MIN_HEIGHT = 96
 
 local activeContext
 
@@ -5444,153 +5965,21 @@ function XClient:CreateWindow(settings)
 		local previousConnections = ctx.connections
 		ctx.rowWidth = PANEL_WIDTH - 12
 		ctx.connections = ctx.flyoutConnections
+		--  While populating, sliders switch to their stacked layout (caption
+		--  above a full width track) - see builders.Slider.
+		local previousStacked = ctx.inSettingsPanel
+		ctx.inSettingsPanel = true
 		--  populate is pcall'd so a broken row cannot leave the context
 		--  pointing at the flyout bucket / narrower width; the error is
 		--  re-raised afterwards to keep the old reporting behaviour
 		local ok, err = pcall(populate or function() end, flyoutBody)
 		ctx.connections = previousConnections
 		ctx.rowWidth = previousWidth
+		ctx.inSettingsPanel = previousStacked
 		if not ok then error(err, 0) end
 	end
 
 	flyoutClose.MouseButton1Click:Connect(closeFlyout)
-
-	--  Compact settings popup ------------------------------------------
-	--  Right clicking a module gear opens this instead of the full height
-	--  flyout: the same rows, but the panel hugs its content, stops growing at
-	--  COMPACT_MAX_HEIGHT and scrolls past that.  It sits in the same spot on
-	--  the left of the window.
-	local compact = newFrame({
-		Name = "SettingsCompact",
-		BackgroundColor3 = currentTheme.Surface,
-		Size = UDim2.fromOffset(COMPACT_WIDTH, COMPACT_MIN_HEIGHT),
-		Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0),
-		Visible = false,
-		Parent = root,
-	})
-	compact.ZIndex = 30
-	addCorner(compact, UDim.new(0, 10))
-	local compactStroke = addStroke(compact, currentTheme.Stroke, 1, 0.25)
-
-	local compactTitle = newText({
-		Name = "Title",
-		Text = "Settings",
-		Font = THEME_FONT_BOLD,
-		TextSize = 14,
-		TextColor3 = currentTheme.Text,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		Size = UDim2.new(1, -24, 0, 20),
-		Position = UDim2.fromOffset(12, 14),
-		Parent = compact,
-	})
-	compactTitle.ZIndex = 31
-
-	local compactClose = create("TextButton", {
-		Name = "Close",
-		Text = "",
-		AutoButtonColor = false,
-		BackgroundTransparency = 1,
-		Size = UDim2.fromOffset(20, 20),
-		Position = UDim2.new(1, -10, 0, 14),
-		AnchorPoint = Vector2.new(1, 0),
-		Parent = compact,
-	})
-	compactClose.ZIndex = 31
-	local compactBarA = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(10, 1.6), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = 45, Parent = compactClose })
-	local compactBarB = newFrame({ BackgroundColor3 = currentTheme.TextMuted, Size = UDim2.fromOffset(10, 1.6), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), Rotation = -45, Parent = compactClose })
-	compactBarA.ZIndex = 32
-	compactBarB.ZIndex = 32
-
-	local compactBody = create("ScrollingFrame", {
-		Name = "Body",
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Size = UDim2.new(1, -12, 0, COMPACT_MIN_HEIGHT - (TOPBAR_HEIGHT + 14)),
-		Position = UDim2.fromOffset(6, TOPBAR_HEIGHT + 6),
-		ScrollBarThickness = 3,
-		ScrollBarImageColor3 = currentTheme.Stroke,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = UDim2.new(),
-		Parent = compact,
-	})
-	compactBody.ZIndex = 31
-	addList(compactBody, { Padding = UDim.new(0, 6) })
-
-	local compactOpen = false
-	local compactTarget
-
-	--  Classes that are GuiObjects.  Instance:IsA("GuiObject") answers this in
-	--  the engine; the dev harness shim compares class names exactly, so the
-	--  list keeps the measuring below working on both.
-	local COMPACT_GUI_CLASSES = {
-		Frame = true, TextLabel = true, TextButton = true, TextBox = true,
-		ImageLabel = true, ImageButton = true, ScrollingFrame = true,
-		CanvasGroup = true, ViewportFrame = true, VideoFrame = true,
-	}
-	local function compactIsGui(child)
-		local ok, result = pcall(function() return child:IsA("GuiObject") end)
-		if ok and result then return true end
-		return COMPACT_GUI_CLASSES[child.ClassName] == true
-	end
-
-	--  Sums the row heights the populator laid down (plus the list padding) so
-	--  the panel can be sized to fit them without waiting for a layout pass.
-	local function compactContentHeight(container)
-		local total, count = 0, 0
-		for _, child in ipairs(container:GetChildren()) do
-			if compactIsGui(child) then
-				local size = child.Size
-				total = total + (size and size.Y and size.Y.Offset or 0)
-				count = count + 1
-			end
-		end
-		return total + math.max(0, count - 1) * 6
-	end
-
-	local function closeCompact()
-		if not compactOpen then return end
-		compactOpen = false
-		compactTarget = nil
-		releaseFlyoutConnections()
-		ctx.closePopup()
-		releaseTextBoxFocus()
-		tween(compact, 0.16, { Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0) })
-		task.delay(0.18, function()
-			if not compactOpen and compact and compact.Parent then
-				compact.Visible = false
-			end
-		end)
-	end
-
-	local function openCompact(heading, populate)
-		releaseFlyoutConnections()
-		compactBody:ClearAllChildren()
-		ctx.closePopup()
-		addList(compactBody, { Padding = UDim.new(0, 6) })
-		compactTitle.Text = tostring(heading or "Settings")
-		fitLabel(compactTitle, COMPACT_WIDTH - 46, { MinSize = 10 })
-		local previousWidth = ctx.rowWidth
-		local previousConnections = ctx.connections
-		ctx.rowWidth = COMPACT_WIDTH - 12
-		ctx.connections = ctx.flyoutConnections
-		local ok, err = pcall(populate or function() end, compactBody)
-		ctx.connections = previousConnections
-		ctx.rowWidth = previousWidth
-		if not ok then error(err, 0) end
-		--  auto height: hug the rows, but never pass the cap - past it the
-		--  body keeps a fixed viewport and scrolls (AutomaticCanvasSize)
-		local bodyMin = COMPACT_MIN_HEIGHT - (TOPBAR_HEIGHT + 14)
-		local bodyMax = COMPACT_MAX_HEIGHT - (TOPBAR_HEIGHT + 14)
-		local bodyHeight = math.clamp(compactContentHeight(compactBody) + 6, bodyMin, bodyMax)
-		compactBody.Size = UDim2.new(1, -12, 0, bodyHeight)
-		compact.Size = UDim2.fromOffset(COMPACT_WIDTH, bodyHeight + TOPBAR_HEIGHT + 14)
-		compact.Visible = true
-		compact.Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP), 0)
-		compactOpen = true
-		tween(compact, 0.2, { Position = UDim2.fromOffset(-(COMPACT_WIDTH + PANEL_GAP - 4), 0) })
-	end
-
-	compactClose.MouseButton1Click:Connect(closeCompact)
 
 	--  Instantiate the per module settings of a row inside the flyout ----
 	local function buildModuleSettings(container, base)
@@ -5626,30 +6015,14 @@ function XClient:CreateWindow(settings)
 			closeFlyout()
 			return
 		end
-		--  only one panel at a time: the compact popup gives way
-		closeCompact()
 		settingsTarget = base
 		openFlyout(base.opts and base.opts.Name or "Settings", function(container)
 			buildModuleSettings(container, base)
 		end)
 	end
 
-	--  Right click on a module gear: the compact, auto height panel.
-	ctx.toggleCompactSettings = function(base)
-		if compactTarget == base and compactOpen then
-			closeCompact()
-			return
-		end
-		--  the full height flyout gives way to the compact popup
-		closeFlyout()
-		compactTarget = base
-		openCompact(base.opts and base.opts.Name or "Settings", function(container)
-			buildModuleSettings(container, base)
-		end)
-	end
-
 	ctx.isSettingsOpen = function(base)
-		return (flyoutOpen and settingsTarget == base) or (compactOpen and compactTarget == base)
+		return flyoutOpen and settingsTarget == base
 	end
 
 	--  Global settings panel (topbar gear / configuration manager) --------
@@ -5942,8 +6315,6 @@ function XClient:CreateWindow(settings)
 	end
 
 	openGlobalSettings = function()
-		--  the topbar panel is the full height one; any compact popup gives way
-		closeCompact()
 		settingsTarget = nil
 		openFlyout("Settings", buildGlobalSettings)
 	end
@@ -6005,7 +6376,6 @@ function XClient:CreateWindow(settings)
 		minimised = state and true or false
 		if minimised then
 			closeFlyout()
-			closeCompact()
 		end
 		rail.Visible = not minimised
 		content.Visible = not minimised
@@ -6059,7 +6429,6 @@ function XClient:CreateWindow(settings)
 			--  Popups live on the window, so dismiss any open one with it.
 			ctx.closePopup()
 			closeFlyout()
-			closeCompact()
 			--  A hidden interface must not keep the keyboard: the open key
 			--  would be typed into an invisible field instead of toggling the
 			--  menu back on.
@@ -6452,6 +6821,7 @@ function XClient:CreateWindow(settings)
 		--  Extended widgets (section 9b): viewers and input pads that also
 		--  work inside a module's Settings flyout.
 		function tab:CreatePlayerWidget(settings) return addRecord({ type = "PlayerWidget", opts = settings or {} }) end
+		function tab:CreateAvatarPreview(settings) return addRecord({ type = "AvatarPreview", opts = settings or {} }) end
 		function tab:CreateImage(settings) return addRecord({ type = "Image", opts = settings or {} }) end
 		function tab:CreateCrosshair(settings) return addRecord({ type = "Crosshair", opts = settings or {} }) end
 		function tab:CreateGraph(settings) return addRecord({ type = "Graph", opts = settings or {} }) end
@@ -6464,6 +6834,7 @@ function XClient:CreateWindow(settings)
 		function tab:CreateChips(settings) return addRecord({ type = "Chips", opts = settings or {} }) end
 		--  friendly aliases
 		function tab:CreatePlayerPreview(settings) return tab:CreatePlayerWidget(settings) end
+		function tab:CreateAvatar(settings) return tab:CreateAvatarPreview(settings) end
 		function tab:CreateSkinPreview(settings) return tab:CreateImage(settings) end
 		function tab:CreateLoader(settings) return tab:CreateProgress(settings) end
 
@@ -6512,12 +6883,6 @@ function XClient:CreateWindow(settings)
 		flyoutBody.ScrollBarImageColor3 = theme.Stroke
 		closeBarA.BackgroundColor3 = theme.TextMuted
 		closeBarB.BackgroundColor3 = theme.TextMuted
-		compact.BackgroundColor3 = theme.Surface
-		compactStroke.Color = theme.Stroke
-		compactTitle.TextColor3 = theme.Text
-		compactBody.ScrollBarImageColor3 = theme.Stroke
-		compactBarA.BackgroundColor3 = theme.TextMuted
-		compactBarB.BackgroundColor3 = theme.TextMuted
 		for _, entry in ipairs(tabs) do
 			entry.page.ScrollBarImageColor3 = theme.Stroke
 			entry.button.BackgroundColor3 = entry.page.Visible and theme.Surface or theme.Rail
@@ -6837,7 +7202,6 @@ function XClient:CreateWindow(settings)
 	function Window:ShowSettings() openGlobalSettings() end
 	function Window:HideSettings()
 		closeFlyout()
-		closeCompact()
 	end
 
 	--  Deliberately defined with a dot: the previous examples call it as

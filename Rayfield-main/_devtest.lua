@@ -17,6 +17,34 @@ function Vector2.new(x, y)
 	})
 end
 
+Vector3 = {}
+function Vector3.new(x, y, z)
+	return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, {
+		__typeof = "Vector3",
+		__index = Vector3,
+		__add = function(a, b) return Vector3.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end,
+		__sub = function(a, b) return Vector3.new(a.X - b.X, a.Y - b.Y, a.Z - b.Z) end,
+	})
+end
+
+--  CFrame only has to carry the operators: the library assigns camera.CFrame
+--  and never reads a matrix back, so composition can stay opaque here.
+CFrame = {}
+function CFrame.new(x, y, z)
+	return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, {
+		__typeof = "CFrame",
+		__index = CFrame,
+		__mul = function(a) return a end,
+	})
+end
+function CFrame.Angles(x, y, z)
+	return setmetatable({ RX = x or 0, RY = y or 0, RZ = z or 0 }, {
+		__typeof = "CFrame",
+		__index = CFrame,
+		__mul = function(a) return a end,
+	})
+end
+
 UDim = {}
 function UDim.new(scale, offset)
 	return setmetatable({ Scale = scale or 0, Offset = offset or 0 }, { __typeof = "UDim" })
@@ -303,7 +331,50 @@ function instanceMethods.FindFirstChildOfClass(self, className)
 	return nil
 end
 
-function instanceMethods.IsA(self, className) return self.className == className end
+--  IsA answers the common base-class questions too (a Part is a BasePart, a
+--  Frame is a GuiObject), which the engine does and the AvatarPreview relies
+--  on when it scans an avatar for its limbs.
+local CLASS_PARENTS = {
+	Part = "BasePart", MeshPart = "BasePart", UnionOperation = "BasePart", TrussPart = "BasePart",
+	WedgePart = "BasePart", CornerWedgePart = "BasePart", VehicleSeat = "BasePart", Seat = "BasePart",
+	BasePart = "PVInstance", Model = "PVInstance", WorldModel = "Instance",
+	Frame = "GuiObject", TextLabel = "GuiObject", TextButton = "GuiObject", TextBox = "GuiObject",
+	ImageLabel = "GuiObject", ImageButton = "GuiObject", ScrollingFrame = "GuiObject",
+	ViewportFrame = "GuiObject", CanvasGroup = "GuiObject", VideoFrame = "GuiObject",
+}
+function instanceMethods.IsA(self, className)
+	local current = self.className
+	while current do
+		if current == className then return true end
+		current = CLASS_PARENTS[current]
+	end
+	return false
+end
+
+function instanceMethods.GetDescendants(self)
+	local out = {}
+	local function walk(node)
+		for _, child in ipairs(rawget(node, "children")) do
+			out[#out + 1] = child
+			walk(child)
+		end
+	end
+	walk(self)
+	return out
+end
+
+function instanceMethods.Clone(self)
+	local copy = newInstance(self.className)
+	for key, value in pairs(rawget(self, "props")) do
+		if key ~= "Parent" then copy.props[key] = value end
+	end
+	for _, child in ipairs(rawget(self, "children")) do
+		local childCopy = child:Clone()
+		childCopy.props.Parent = copy
+		copy:AddChild(childCopy)
+	end
+	return copy
+end
 
 function instanceMethods.ClearAllChildren(self)
 	--  The engine detaches the list and then destroys every child; iterating
@@ -1654,6 +1725,94 @@ check("AllowMultiple = false replaces the selection", #single:GetSelection() == 
 single.Highlight["right arm"] = true
 check("spaced region aliases work", single:GetRegion("RightArm") == true)
 
+--  ------------------------------------------------------------ avatar
+--  The 3D avatar preview: a ViewportFrame holding a WorldModel + Camera, an
+--  orbit / zoom API and the same Highlight / Skin variables as PlayerWidget
+--  (painted as an ESP style neon tint).  Its own function, like section 27,
+--  to keep the chunk's local list within Lua 5.1's 200 local limit.
+local function avatarPreview()
+	print("== 19b. AvatarPreview ==")
+	local Avatar = Main:CreateAvatarPreview({ Name = "Target preview", Flag = "avatarFlag" })
+	check("avatar preview returned", realType(Avatar) == "table")
+	check("six regions exposed", #Avatar.Regions == 6)
+	check("avatar registered as a flag", XClient.Flags["avatarFlag"] == Avatar)
+	local viewport = Avatar.Element:FindFirstChild("Viewport")
+	check("viewport frame created", viewport ~= nil)
+	check("a camera drives the viewport", viewport ~= nil and viewport.CurrentCamera ~= nil)
+	local world = viewport and viewport:FindFirstChild("World")
+	check("a procedural R6 rig was built", world ~= nil
+		and world:FindFirstChild("Head") ~= nil
+		and world:FindFirstChild("LeftLeg") ~= nil
+		and world:FindFirstChild("RightArm") ~= nil)
+
+	local head = world and world:FindFirstChild("Head")
+	Avatar.Highlight.Torso = true
+	check("widget.Highlight.Torso repaints", Avatar:GetRegion("Torso") == true)
+	check("caption follows the selection", string.find(tostring(Avatar.Element.Caption.Text), "Torso") ~= nil)
+	Avatar.Highlight.All = false
+	check("widget.Highlight.All = false clears", #Avatar:GetSelection() == 0)
+
+	Avatar:SetRegion("Head", true)
+	check("SetRegion selects a region", Avatar:GetRegion("Head") == true)
+	check("highlight paints the part neon (ESP tint)", head ~= nil and head.Material == Enum.Material.Neon)
+	Avatar:SetRegion("Head", false)
+	check("clearing restores the solid material", head ~= nil and head.Material == Enum.Material.SmoothPlastic)
+
+	Avatar.Skin.Torso = Color3.fromRGB(10, 20, 30)
+	local torso = world and world:FindFirstChild("Torso")
+	check("widget.Skin.Torso reaches the part", torso ~= nil and sameColor(torso.Color, Color3.fromRGB(10, 20, 30)))
+	check("widget.Skin.Torso reads back", sameColor(Avatar:GetSkin("Torso"), Color3.fromRGB(10, 20, 30)))
+
+	local yaw0, pitch0 = Avatar:GetYaw()
+	Avatar:Rotate(30, 15)
+	local yaw1, pitch1 = Avatar:GetYaw()
+	check("Rotate moves the camera", yaw1 ~= yaw0 and pitch1 ~= pitch0)
+
+	--  scroll to zoom, but only while the pointer is over the viewport
+	viewport.AbsolutePosition = Vector2.new(400, 250)
+	viewport.AbsoluteSize = Vector2.new(300, 200)
+	local zoom0 = Avatar:GetZoom()
+	UserInputService.InputChanged:Fire({ UserInputType = Enum.UserInputType.MouseWheel, Position = Vector3.new(0, 0, -1) })
+	check("wheel over the viewport zooms in", Avatar:GetZoom() > zoom0)
+	viewport.AbsolutePosition = Vector2.new(0, 0)
+	viewport.AbsoluteSize = Vector2.new(10, 10)
+	local zoom1 = Avatar:GetZoom()
+	UserInputService.InputChanged:Fire({ UserInputType = Enum.UserInputType.MouseWheel, Position = Vector3.new(0, 0, -1) })
+	check("wheel away from the viewport is ignored", Avatar:GetZoom() == zoom1)
+
+	Avatar:SetZoom(0.5)
+	check("SetZoom stores the factor", Avatar:GetZoom() == 0.5)
+	Avatar:SetZoom(99)
+	check("SetZoom clamps to the maximum", Avatar:GetZoom() <= 2.4)
+	Avatar:ResetCamera()
+	check("ResetCamera restores the defaults", Avatar:GetZoom() == 1)
+
+	Avatar:Set({ "Head", "Torso" })
+	check(":Set(list) applies a selection", #Avatar:GetSelection() == 2)
+	check(":Serialize matches the selection", #Avatar:Serialize() == 2)
+	Avatar:Clear()
+	check(":Clear empties the selection", #Avatar:GetSelection() == 0)
+
+	--  a real avatar (a Model) replaces the procedural rig
+	local model = Instance.new("Model")
+	local mHead = Instance.new("Part"); mHead.Name = "Head"; mHead.Parent = model
+	local mTorso = Instance.new("Part"); mTorso.Name = "Torso"; mTorso.Parent = model
+	Avatar:SetModel(model)
+	drainDeferred()
+	local world2 = viewport and viewport:FindFirstChild("World")
+	check("SetModel swaps in the given avatar", world2 ~= nil and world2 ~= world
+		and world2:FindFirstChild("Head") ~= nil)
+	check("...with freshly cloned parts", world2 and world2:FindFirstChild("Torso") ~= mTorso)
+
+	--  SetTarget / SetUserId tolerate junk instead of raising
+	Avatar:SetTarget(Instance.new("Model"))
+	Avatar:SetUserId("not a number")
+	check("SetTarget / SetUserId tolerate junk", true)
+
+	Main:Select()
+end
+avatarPreview()
+
 print("== 20. extra widgets: crosshair / graph / progress / stepper ==")
 local Crosshair = Main:CreateCrosshair({ Name = "Aim FOV", Flag = "fovFlag", FOV = 90, MaxFOV = 360, Dot = { X = 1, Y = 1 } })
 check("crosshair returned", realType(Crosshair) == "table")
@@ -2016,93 +2175,75 @@ local function testSearchBar()
 end
 testSearchBar()
 
---  ------------------------------------------------------- compact flyout
---  Right clicking a module gear opens the compact, auto height panel; the
---  left click keeps the full height flyout.  Its own function, like section
---  26, to keep the chunk's local list within Lua 5.1's 200 local limit.
-local function compactSettingsFlyout()
-	print("== 27. compact module settings (right click the gear) ==")
-	local compactPanel = root:FindFirstChild("SettingsCompact")
-	check("the compact popup exists next to the full flyout", compactPanel ~= nil)
-	check("...and starts hidden", compactPanel and compactPanel.Visible == false)
+--  ------------------------------------------------- right click on a gear
+--  The compact, auto height settings popup was removed: right clicking a
+--  module gear must now do nothing at all.  The full height flyout (left
+--  click) is the only settings panel, and its sliders use the stacked
+--  caption-over-track layout.  Its own function, like section 26, to keep
+--  the chunk's local list within Lua 5.1's 200 local limit.
+local function gearRightClick()
+	print("== 27. right clicking a gear is inert ==")
+	check("the compact settings popup is gone", root:FindFirstChild("SettingsCompact") == nil)
 
-	--  a small module: the popup hugs its rows
+	if flyout.Visible then
+		WithSettings.Base.gearButton.MouseButton1Click:Fire()
+		drainDeferred()
+	end
+	check("the flyout starts closed", flyout.Visible == false)
+
 	WithSettings.Base.gearButton.MouseButton2Click:Fire()
 	drainDeferred()
-	check("right click opens the compact popup", compactPanel.Visible == true)
-	check("...while the full flyout stays closed", flyout.Visible == false)
-	local compactBody = compactPanel:FindFirstChild("Body")
-	check("the compact popup is populated", compactBody ~= nil and compactBody:FindFirstChild("Heading") ~= nil)
-	check("its rows register their flags", XClient.Flags["gearDistance"] ~= nil)
+	check("right click opens nothing", flyout.Visible == false)
+	check("...and no compact panel appears", root:FindFirstChild("SettingsCompact") == nil)
 
-	--  the nested slider is the narrowest one in the interface: its track must
-	--  stay inside the row and its knob must not sit on top of the caption
-	local sliderRow = compactBody and compactBody:FindFirstChild("Distance")
-	local narrowTrack = sliderRow and sliderRow:FindFirstChild("Track")
-	local narrowValue = sliderRow and sliderRow:FindFirstChild("Value")
-	local narrowTitle = sliderRow and sliderRow:FindFirstChild("Title")
-	check("the compact slider track fits inside the row",
-		narrowTrack ~= nil and narrowValue ~= nil
-		and narrowTrack.Position.X.Offset + narrowTrack.Size.X.Offset <= narrowValue.Position.X.Offset)
-	check("...and its knob stays clear of the caption",
-		narrowTrack ~= nil and narrowTitle ~= nil
-		and narrowTrack.Position.X.Offset - 12
-			>= narrowTitle.Position.X.Offset + narrowTitle.Size.X.Offset)
-	check("it is auto height - shorter than the window",
-		compactPanel.Size.Y.Offset < root.Size.Y.Offset)
-	check("...but still fits its own title bar", compactPanel.Size.Y.Offset >= 96)
-
-	--  the same gear again closes it
-	WithSettings.Base.gearButton.MouseButton2Click:Fire()
-	drainDeferred()
-	check("right clicking again closes the compact popup", compactPanel.Visible == false)
-
-	--  left click is unchanged: it still opens the full height panel
 	WithSettings.Base.gearButton.MouseButton1Click:Fire()
 	drainDeferred()
 	check("left click still opens the full flyout", flyout.Visible == true)
-	check("...and leaves the compact popup closed", compactPanel.Visible == false)
 
-	--  the compact mode takes over from the full flyout
 	WithSettings.Base.gearButton.MouseButton2Click:Fire()
 	drainDeferred()
-	check("the compact mode replaces the full flyout",
-		compactPanel.Visible == true and flyout.Visible == false)
-	WithSettings.Base.gearButton.MouseButton2Click:Fire()
-	drainDeferred()
+	check("right click does not close the open flyout", flyout.Visible == true)
 
-	--  a module with many rows: it stops growing at the cap and scrolls
-	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
-	drainDeferred()
-	check("a long module is capped instead of growing forever",
-		compactPanel.Visible == true and compactPanel.Size.Y.Offset <= 300)
-	local tallBody = compactPanel:FindFirstChild("Body")
-	check("its rows are all built", tallBody ~= nil and tallBody:FindFirstChild("Load") ~= nil)
-	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
-	drainDeferred()
+	--  the widened panel with the stacked slider layout
+	check("the flyout was widened 25% (210 -> 263)", flyout.Size.X.Offset == 263)
+	local body = flyout:FindFirstChild("Body")
+	local row = body and body:FindFirstChild("Distance")
+	local title = row and row:FindFirstChild("Title")
+	local track = row and row:FindFirstChild("Track")
+	local value = row and row:FindFirstChild("Value")
+	check("the settings slider is stacked: caption above the track",
+		title ~= nil and track ~= nil and value ~= nil
+		and title.Position.Y.Offset + title.Size.Y.Offset <= track.Position.Y.Offset)
+	check("...the value read-out rides the caption line",
+		value ~= nil and track ~= nil and value.Position.Y.Offset < track.Position.Y.Offset)
+	check("...the track spans the row",
+		track ~= nil and track.Position.X.Offset >= 20
+		and track.Position.X.Offset + track.Size.X.Offset <= flyout.Size.X.Offset - 12)
+	check("...and the row is taller than a standard one", row ~= nil and row.Size.Y.Offset >= 58)
 
-	--  the compact rows must not leak their input handlers
+	--  reopening the gear still leaks no input handler
 	local before = inputConnections()
 	for _ = 1, 6 do
-		SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+		WithSettings.Base.gearButton.MouseButton1Click:Fire()
 		drainDeferred()
-		SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+		WithSettings.Base.gearButton.MouseButton1Click:Fire()
 		drainDeferred()
 	end
-	check("reopening the compact popup leaks no input handler (grew by "
+	check("reopening the flyout leaks no input handler (grew by "
 		.. (inputConnections() - before) .. ")", inputConnections() == before)
 
-	--  the compact popup also gives way when the full panel is asked for
-	SettingsToggle.Base.gearButton.MouseButton2Click:Fire()
+	--  the topbar panel still takes the flyout over
+	WithSettings.Base.gearButton.MouseButton1Click:Fire()
 	drainDeferred()
 	Window:ShowSettings()
 	drainDeferred()
-	check("the topbar panel dismisses the compact popup", compactPanel.Visible == false)
+	check("the topbar panel replaces the gear flyout", flyout.Visible == true)
 	Window:HideSettings()
 	drainDeferred()
+	check("Window:HideSettings closes it", flyout.Visible == false)
 	Main:Select()
 end
-compactSettingsFlyout()
+gearRightClick()
 
 print("== 23. the loading animation cleans itself up ==")
 for _ = 1, 30 do drainDeferred() end
