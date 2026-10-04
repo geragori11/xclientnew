@@ -1358,11 +1358,19 @@ local saveRow = settingsBody:FindFirstChild("Save configuration")
 check("save button in the panel", saveRow ~= nil)
 saveRow:FindFirstChild("Interact").MouseButton1Click:Fire()
 check("panel saved a configuration file", isfile("XClient/Configurations/Panel Config.rfld"))
-check("panel listed the new configuration", settingsBody:FindFirstChild("SavedConfigurations"):FindFirstChild("Panel Config") ~= nil)
+check("panel listed the new configuration", settingsBody:FindFirstChild("SavedConfigurations"):FindFirstChild("Config_Panel Config") ~= nil)
 
 local deleteRow = settingsBody:FindFirstChild("Delete configuration")
 deleteRow:FindFirstChild("Interact").MouseButton1Click:Fire()
+--  deleting asks for confirmation first; the dialog hangs off the window
+local confirmBackdrop = root:FindFirstChild("ConfirmBackdrop")
+check("deleting a configuration asks for confirmation", confirmBackdrop ~= nil)
+local confirmDialog = confirmBackdrop and confirmBackdrop:FindFirstChild("ConfirmDialog")
+local confirmActions = confirmDialog and confirmDialog:FindFirstChild("Actions")
+local confirmDelete = confirmActions and confirmActions:FindFirstChild("Delete")
+if confirmDelete then confirmDelete.MouseButton1Click:Fire() end
 check("panel deleted the configuration", isfile("XClient/Configurations/Panel Config.rfld") == false)
+check("the confirmation closed again", root:FindFirstChild("ConfirmBackdrop") == nil)
 
 local loadRow = settingsBody:FindFirstChild("Load configuration")
 loadRow:FindFirstChild("Interact").MouseButton1Click:Fire()
@@ -1603,6 +1611,12 @@ liveBox.Text = "Live Name"
 liveBody:FindFirstChild("Save configuration"):FindFirstChild("Interact").MouseButton1Click:Fire()
 check("save uses the name that is on screen", isfile("XClient/Configurations/Live Name.rfld"))
 liveBody:FindFirstChild("Delete configuration"):FindFirstChild("Interact").MouseButton1Click:Fire()
+--  confirm the delete dialog
+local liveBackdrop = root:FindFirstChild("ConfirmBackdrop")
+local liveDialog = liveBackdrop and liveBackdrop:FindFirstChild("ConfirmDialog")
+local liveActions = liveDialog and liveDialog:FindFirstChild("Actions")
+local liveConfirm = liveActions and liveActions:FindFirstChild("Delete")
+if liveConfirm then liveConfirm.MouseButton1Click:Fire() end
 check("the live name can be deleted again", isfile("XClient/Configurations/Live Name.rfld") == false)
 Window:HideSettings()
 drainDeferred()
@@ -2471,10 +2485,13 @@ local function soakGearFlyout()
 		},
 		Callback = function() end,
 	})
-	--  the rows behind the gear are built on demand, so their flags only exist
-	--  once the panel has been opened at least once (Documentation.md, section 5)
-	check("nested flags do not exist before the first gear press",
-		XClient.Flags["soakToggle"] == nil and XClient.Flags["soakSlider"] == nil)
+	--  the rows behind the gear are registered up front as lightweight shadows,
+	--  so their flags exist (and are saved into a configuration) even before the
+	--  panel was ever opened (Documentation.md, section 7)
+	check("nested flags exist before the first gear press (eager shadows)",
+		XClient.Flags["soakToggle"] ~= nil and XClient.Flags["soakSlider"] ~= nil)
+	check("the nested flags start as configuration shadows",
+		(XClient.Flags["soakToggle"] or {}).__xclientShadow == true)
 	check("the row carrying the gear is registered right away", XClient.Flags["soakFlag"] ~= nil)
 
 	local soakGui

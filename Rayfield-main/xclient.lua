@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.7.5"
+XClient.Version = "1.7.8"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.7.5"
+XClient.Build = "1.7.8"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -750,11 +750,27 @@ local function fitRowText(base, rowWidth)
 	end
 end
 
+--  Forward declaration: the real definition lives further down, next to the
+--  configuration system (it needs the colour packers).  newRow calls it for
+--  every descriptor listed in opts.Settings so those flags exist in
+--  XClient.Flags even before their gear flyout was ever opened (see the
+--  configuration system section for the full story).
+local registerSettingShadow
+
 -- Builds the base module row: icon + title + description + optional gear button.
 local function newRow(container, ctx, opts)
 	opts = opts or {}
 	local theme = ctx.theme()
 	local hasGear = type(opts.Settings) == "table" and #opts.Settings > 0
+
+	--  Register a configuration shadow for every nested setting up front (see
+	--  registerSettingShadow) so a saved configuration captures module settings
+	--  even when the module's gear was never opened this session.
+	if type(opts.Settings) == "table" then
+		for _, descriptor in ipairs(opts.Settings) do
+			if type(descriptor) == "table" then registerSettingShadow(ctx, descriptor) end
+		end
+	end
 	local hasDesc = opts.Description ~= nil and opts.Description ~= ""
 	local rowHeight = tonumber(opts.Height) or ROW_HEIGHT
 	--  Rows built inside a GroupBox (or asked for it with OnCard = true) sit on
@@ -5389,6 +5405,82 @@ local function unpackColor(value)
 	return Color3.fromRGB(tonumber(value.R) or 255, tonumber(value.G) or 255, tonumber(value.B) or 255)
 end
 
+--  Eager configuration shadows for module settings -------------------------
+--  A module's nested Settings = { ... } rows are only built when its gear
+--  flyout is opened (buildModuleSettings), so their flags did not exist in
+--  XClient.Flags until then - and a configuration saved before the gear was
+--  ever opened silently lost them.  newRow calls this for every nested
+--  descriptor so a lightweight "shadow" flag is registered up front.  The
+--  shadow stores values in exactly the fields the real builders read
+--  (CurrentValue / CurrentOption / CurrentKeybind / Color), so a configuration
+--  loaded while the row is still unbuilt is applied the moment it is built.
+--  When the gear is opened the real builder overwrites the shadow with the
+--  live element and re-registers it; the guard below keeps that from
+--  re-shadowing a live element on a later pass.
+local function settingInitialValue(descriptor, elementType)
+	if elementType == "ColorPicker" then
+		return descriptor.Color or descriptor.Default
+	elseif elementType == "Dropdown" then
+		local value = descriptor.CurrentOption
+		if value == nil then value = descriptor.CurrentValue end
+		if value == nil then value = descriptor.Value end
+		return value
+	elseif elementType == "Keybind" then
+		return descriptor.CurrentKeybind or descriptor.Value
+	end
+	if descriptor.CurrentValue ~= nil then return descriptor.CurrentValue end
+	return descriptor.Value
+end
+
+local function writeSettingValue(descriptor, elementType, value)
+	if elementType == "ColorPicker" then
+		descriptor.Color = value
+	elseif elementType == "Dropdown" then
+		descriptor.CurrentOption = value
+	elseif elementType == "Keybind" then
+		descriptor.CurrentKeybind = value
+	else
+		descriptor.CurrentValue = value
+	end
+	descriptor.Value = value
+end
+
+--  Deliberately NOT `local function`: the forward declaration next to newRow
+--  has to be assigned, otherwise newRow would keep calling a nil upvalue.
+function registerSettingShadow(ctx, descriptor)
+	--  Only descriptors that opt into configuration saving take part.
+	if type(descriptor) ~= "table" or descriptor.Flag == nil or descriptor.Flag == "" then return end
+	--  Spread into any deeper Settings lists (rare, but kept symmetric).
+	if type(descriptor.Settings) == "table" then
+		for _, child in ipairs(descriptor.Settings) do
+			if type(child) == "table" then registerSettingShadow(ctx, child) end
+		end
+	end
+	--  A live element already owns the flag: never shadow over it.
+	if XClient.Flags[descriptor.Flag] ~= nil then return end
+	local elementType = descriptor.Type or "Toggle"
+	descriptor.Type = elementType
+	local value = settingInitialValue(descriptor, elementType)
+	descriptor.__xclientShadow = true
+	--  Only supply defaults: a descriptor the caller filled in itself keeps
+	--  its own Set / Serialize.
+	if type(descriptor.Serialize) ~= "function" then
+		descriptor.Serialize = function(self)
+			local current = settingInitialValue(self, self.Type or elementType)
+			if (self.Type or elementType) == "ColorPicker" then
+				return current and packColor(current) or nil
+			end
+			return current
+		end
+	end
+	if type(descriptor.Set) ~= "function" then
+		descriptor.Set = function(self, newValue)
+			writeSettingValue(self, self.Type or elementType, newValue)
+		end
+	end
+	registerFlag(ctx, descriptor, value, elementType, descriptor)
+end
+
 --  User preferences (currently just the auto-save switch) ------------------
 local function readPreferences()
 	if not filesystemAvailable() or not HttpService then return nil end
@@ -5410,12 +5502,45 @@ local function writePreferences()
 	return pcall(writefile, PREFERENCES_FILE, encoded)
 end
 
+--  Normalises a user supplied configuration name into something every
+--  filesystem accepts.  Returns the clean name, or nil plus a short reason the
+--  panel can show.  Without this a stray "/", ":" or an empty box made the
+--  write fail silently while the interface still claimed the file was saved.
+local function sanitizeConfigName(name)
+	if type(name) ~= "string" then return nil, "No name was given" end
+	--  Collapse whitespace runs, then trim.
+	local clean = name:gsub("%s+", " ")
+	clean = clean:gsub("^%s+", ""):gsub("%s+$", "")
+	if clean == "" then return nil, "The name is empty" end
+	--  Characters no filesystem allows, control characters, and the trailing
+	--  dots / spaces Windows refuses at the end of a name.
+	clean = clean:gsub("[\\/:*?\"<>|]", "")
+	clean = clean:gsub("[%z\1-\31]", "")
+	clean = clean:gsub("[%. ]+$", "")
+	clean = clean:sub(1, 64)
+	clean = clean:gsub("%s+$", "")
+	if clean == "" then return nil, "The name has no usable characters" end
+	return clean
+end
+
+--  Resolves a configuration name to the file that actually holds it.  The
+--  current folder wins; the legacy Rayfield folder is only read from.
+local function configExists(name)
+	if not filesystemAvailable() or not name then return nil end
+	local paths = {
+		configState.folder .. "/" .. name .. CONFIG_EXTENSION,
+		LEGACY_CONFIG_ROOT .. "/Configurations/" .. name .. CONFIG_EXTENSION,
+	}
+	for _, path in ipairs(paths) do
+		if isfile(path) then return path end
+	end
+	return nil
+end
+
 --  Whether the auto-saved configuration file already exists on disk.
 local function configFileExists()
 	if not filesystemAvailable() or not configState.fileName then return false end
-	local path = configState.folder .. "/" .. configState.fileName .. CONFIG_EXTENSION
-	if isfile(path) then return true end
-	return isfile(LEGACY_CONFIG_ROOT .. "/Configurations/" .. configState.fileName .. CONFIG_EXTENSION)
+	return configExists(configState.fileName) ~= nil
 end
 
 --  Collects the current state of every registered flag.
@@ -5578,28 +5703,41 @@ local function loadConfiguration(silent)
 end
 
 --  Explicit configuration manager used by the built in configuration panel.
+--  Each returns <ok>, <clean name> or <ok>, <reason>, so the panel can show a
+--  truthful result instead of claiming a file was written when it was not.
 local function saveConfigurationAs(name)
-	if not filesystemAvailable() or not name or name == "" then return false end
+	if not filesystemAvailable() then return false, "This executor has no filesystem support" end
+	local clean, reason = sanitizeConfigName(name)
+	if not clean then return false, reason end
 	local encoded = encodeFlags()
-	if not encoded then return false end
+	if not encoded then return false, "The current values could not be encoded" end
 	ensureFolder(configState.folder)
-	return pcall(writefile, configState.folder .. "/" .. name .. CONFIG_EXTENSION, encoded)
+	local ok = pcall(writefile, configState.folder .. "/" .. clean .. CONFIG_EXTENSION, encoded)
+	if ok then return true, clean end
+	return false, "The file could not be written"
 end
 
 local function loadConfigurationAs(name)
-	local raw = readConfigFile(name)
-	if not raw then return false end
+	if not filesystemAvailable() then return false, "This executor has no filesystem support" end
+	local clean, reason = sanitizeConfigName(name)
+	if not clean then return false, reason end
+	local raw = readConfigFile(clean)
+	if not raw then return false, "There is no saved configuration named '" .. clean .. "'" end
 	local data = decodeFlags(raw)
-	if not data then return false end
+	if not data then return false, "The saved file for '" .. clean .. "' could not be read" end
 	applyFlags(data)
-	return true
+	return true, clean
 end
 
 local function deleteConfiguration(name)
-	if not filesystemAvailable() or type(delfile) ~= "function" or not name then return false end
-	local path = configState.folder .. "/" .. name .. CONFIG_EXTENSION
-	if isfile(path) then return pcall(delfile, path) end
-	return false
+	local clean, reason = sanitizeConfigName(name)
+	if not clean then return false, reason end
+	if type(delfile) ~= "function" then return false, "This executor cannot delete files" end
+	local path = configExists(clean)
+	if not path then return false, "There is no saved configuration named '" .. clean .. "'" end
+	local ok = pcall(delfile, path)
+	if ok then return true, clean end
+	return false, "The file could not be deleted"
 end
 
 local function listConfigurations()
@@ -5931,6 +6069,9 @@ function XClient:CreateWindow(settings)
 		releaseFlyoutConnections()
 		--  Any dropdown / colour picker opened inside the flyout must go too.
 		ctx.closePopup()
+		--  A confirmation dialog belongs to whatever asked for it, so it goes
+		--  with the panel.
+		if ctx.closeConfirm then ctx.closeConfirm() end
 		--  The configuration name field lives in here: closing the panel has
 		--  to hand the keyboard back, otherwise an invisible box keeps
 		--  eating every keystroke.
@@ -6111,6 +6252,141 @@ function XClient:CreateWindow(settings)
 	openKeySetters[#openKeySetters + 1] = setOpenKey
 	ctx.setOpenKey = setOpenKey
 
+	--  Confirmation dialog -------------------------------------------------
+	--  A small themed modal over the window.  The configuration manager uses
+	--  it before anything destructive (overwriting or deleting a saved file),
+	--  so the player always gets a warning and never loses a file by accident.
+	--  It hangs off the window (not the flyout), so rebuilding the panel can
+	--  never leave half a dialog behind.
+	local activeDialog
+	local function closeConfirm()
+		if activeDialog and activeDialog.Parent then activeDialog:Destroy() end
+		activeDialog = nil
+	end
+	ctx.closeConfirm = closeConfirm
+
+	local function openConfirm(options)
+		options = options or {}
+		closeConfirm()
+		local theme = currentTheme
+
+		local backdrop = create("TextButton", {
+			Name = "ConfirmBackdrop",
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+			BackgroundTransparency = 0.45,
+			Size = UDim2.fromScale(1, 1),
+			ZIndex = 90,
+			Parent = root,
+		})
+		backdrop.MouseButton1Click:Connect(closeConfirm)
+		activeDialog = backdrop
+
+		--  A TextButton, not a Frame: it swallows the clicks that land on the
+		--  card so they cannot fall through to the backdrop and dismiss it.
+		local card = create("TextButton", {
+			Name = "ConfirmDialog",
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = theme.Surface,
+			Size = UDim2.new(0, 300, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Position = UDim2.fromScale(0.5, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Parent = backdrop,
+		})
+		card.ZIndex = 91
+		addCorner(card, UDim.new(0, 10))
+		addStroke(card, theme.Stroke, 1, 0)
+		addPadding(card, 16)
+		addList(card, { Padding = UDim.new(0, 10) })
+
+		local header = newText({
+			Name = "Title",
+			Text = tostring(options.Title or "Are you sure?"),
+			Font = THEME_FONT_BOLD,
+			TextSize = 14,
+			TextColor3 = theme.Text,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = card,
+		})
+		header.ZIndex = 92
+
+		local message = newText({
+			Name = "Message",
+			Text = tostring(options.Message or ""),
+			TextSize = 12,
+			TextColor3 = theme.TextMuted,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = card,
+		})
+		message.ZIndex = 92
+
+		local actions = newFrame({
+			Name = "Actions",
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 30),
+			Parent = card,
+		})
+		actions.ZIndex = 92
+		addList(actions, {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Right,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 8),
+		})
+
+		local function dialogButton(text, color, onClick, filled)
+			local button = create("TextButton", {
+				Name = text,
+				Text = text,
+				Font = THEME_FONT_BOLD,
+				TextSize = 12,
+				TextColor3 = filled and Color3.fromRGB(255, 255, 255) or theme.Text,
+				BackgroundColor3 = filled and color or theme.SurfaceAlt,
+				AutoButtonColor = false,
+				Size = UDim2.fromOffset(110, 28),
+				Parent = actions,
+			})
+			button.ZIndex = 93
+			addCorner(button, UDim.new(0, 6))
+			addStroke(button, filled and color or theme.StrokeSoft, 1, 0)
+			button.MouseEnter:Connect(function()
+				tween(button, 0.12, {
+					BackgroundColor3 = filled
+						and color:Lerp(Color3.new(1, 1, 1), 0.15)
+						or theme.SurfaceHover,
+				})
+			end)
+			button.MouseLeave:Connect(function()
+				tween(button, 0.12, { BackgroundColor3 = filled and color or theme.SurfaceAlt })
+			end)
+			button.MouseButton1Click:Connect(function()
+				if onClick then pcall(onClick) end
+			end)
+			return button
+		end
+
+		dialogButton("Cancel", theme.TextMuted, closeConfirm, false)
+		dialogButton(
+			options.ConfirmText or "Confirm",
+			options.Danger and Color3.fromRGB(214, 72, 72) or theme.Accent,
+			function()
+				closeConfirm()
+				if options.OnConfirm then options.OnConfirm() end
+			end,
+			true
+		)
+	end
+
 	local function currentThemeName()
 		for name, palette in pairs(Themes) do
 			if palette == currentTheme then return name end
@@ -6139,8 +6415,23 @@ function XClient:CreateWindow(settings)
 		builders.Section(container, ctx, "Configuration")
 		local configName = configState.fileName or "Default"
 		local refreshConfigList
+		local selectedConfig
+		local configNameInput
+		local listHolder
 
-		builders.Input(container, ctx, {
+		local function notifyConfig(text)
+			XClient:Notify({ Title = "XClient Configurations", Content = tostring(text) })
+		end
+
+		--  Keeps the field above and the internal name in step, whatever set
+		--  the selection (a list row, a fresh save).  :SetSilent does not fire
+		--  the LiveUpdate callback, so configName is assigned by hand.
+		local function setConfigName(name)
+			configName = tostring(name or "")
+			if configNameInput then configNameInput:SetSilent(configName) end
+		end
+
+		configNameInput = builders.Input(container, ctx, {
 			Name = "Config file name",
 			CurrentValue = configName,
 			PlaceholderText = "Config name",
@@ -6180,11 +6471,35 @@ function XClient:CreateWindow(settings)
 		builders.Button(container, ctx, {
 			Name = "Save configuration",
 			Callback = function()
-				if saveConfigurationAs(configName) then
-					XClient:Notify({ Title = "XClient Configurations", Content = "'" .. tostring(configName) .. "' has been saved." })
+				local clean, reason = sanitizeConfigName(configName)
+				if not clean then
+					notifyConfig(reason or "That name cannot be used.")
+					return
+				end
+				--  Overwriting a file is destructive, so warn before it happens
+				--  and only act once the player confirms.
+				local function commit()
+					local ok, result = saveConfigurationAs(clean)
+					if not ok then
+						notifyConfig(result or "Saving failed.")
+						return
+					end
+					result = result or clean
+					setConfigName(result)
+					selectedConfig = result
+					notifyConfig("'" .. result .. "' has been saved.")
 					if refreshConfigList then refreshConfigList() end
+				end
+				if configExists(clean) then
+					openConfirm({
+						Title = "Overwrite configuration?",
+						Message = "A saved configuration named '" .. clean .. "' already exists. Overwriting it replaces its values and cannot be undone.",
+						ConfirmText = "Overwrite",
+						Danger = true,
+						OnConfirm = commit,
+					})
 				else
-					XClient:Notify({ Title = "XClient Configurations", Content = "Saving failed - no filesystem support available." })
+					commit()
 				end
 			end,
 		})
@@ -6192,27 +6507,57 @@ function XClient:CreateWindow(settings)
 		builders.Button(container, ctx, {
 			Name = "Load configuration",
 			Callback = function()
-				if loadConfigurationAs(configName) then
-					XClient:Notify({ Title = "XClient Configurations", Content = "'" .. tostring(configName) .. "' has been loaded." })
-				else
-					XClient:Notify({ Title = "XClient Configurations", Content = "No saved configuration named '" .. tostring(configName) .. "'." })
+				local clean, reason = sanitizeConfigName(configName)
+				if not clean then
+					notifyConfig(reason or "Type the name of a saved configuration first.")
+					return
 				end
+				local ok, result = loadConfigurationAs(clean)
+				if not ok then
+					notifyConfig(result or "Loading failed.")
+					return
+				end
+				result = result or clean
+				selectedConfig = result
+				setConfigName(result)
+				notifyConfig("'" .. result .. "' has been loaded.")
+				if refreshConfigList then refreshConfigList() end
 			end,
 		})
 
 		builders.Button(container, ctx, {
 			Name = "Delete configuration",
 			Callback = function()
-				if deleteConfiguration(configName) then
-					XClient:Notify({ Title = "XClient Configurations", Content = "'" .. tostring(configName) .. "' has been deleted." })
-					if refreshConfigList then refreshConfigList() end
-				else
-					XClient:Notify({ Title = "XClient Configurations", Content = "No saved configuration named '" .. tostring(configName) .. "'." })
+				local clean, reason = sanitizeConfigName(configName)
+				if not clean then
+					notifyConfig(reason or "Type the name of a saved configuration first.")
+					return
 				end
+				if not configExists(clean) then
+					notifyConfig("There is no saved configuration named '" .. clean .. "'.")
+					return
+				end
+				openConfirm({
+					Title = "Delete configuration?",
+					Message = "Deleting '" .. clean .. "' removes the file from disk. This cannot be undone.",
+					ConfirmText = "Delete",
+					Danger = true,
+					OnConfirm = function()
+						local ok, result = deleteConfiguration(clean)
+						if not ok then
+							notifyConfig(result or "Deleting failed.")
+						else
+							result = result or clean
+							if selectedConfig == result then selectedConfig = nil end
+							notifyConfig("'" .. result .. "' has been deleted.")
+						end
+						if refreshConfigList then refreshConfigList() end
+					end,
+				})
 			end,
 		})
 
-		local listHolder = newFrame({
+		listHolder = newFrame({
 			Name = "SavedConfigurations",
 			BackgroundTransparency = 1,
 			Size = UDim2.new(1, 0, 0, 0),
@@ -6221,11 +6566,146 @@ function XClient:CreateWindow(settings)
 		})
 		addList(listHolder, { Padding = UDim.new(0, 4) })
 
+		--  One row of the saved list.  Clicking the row selects the name (so the
+		--  field above and any later Save / Load / Delete follow the click), and
+		--  the two small buttons on the right act on it straight away.
+		local function buildSavedRow(name, autoTagged)
+			local theme = currentTheme
+			local selected = selectedConfig == name
+			local row = newFrame({
+				Name = "Config_" .. name,
+				BackgroundColor3 = selected and theme.SurfaceHover or theme.Surface,
+				Size = UDim2.new(1, 0, 0, 28),
+				Parent = listHolder,
+			})
+			addCorner(row, UDim.new(0, 5))
+			addStroke(row, selected and theme.Accent or theme.StrokeSoft, 1, 0)
+
+			--  Full width selectable area, sitting underneath the buttons.
+			local select = create("TextButton", {
+				Name = "Select",
+				Text = "",
+				AutoButtonColor = false,
+				BackgroundTransparency = 1,
+				Size = UDim2.fromScale(1, 1),
+				ZIndex = 3,
+				Parent = row,
+			})
+
+			newText({
+				Name = "Label",
+				Text = name,
+				TextSize = 12,
+				TextColor3 = theme.Text,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Size = UDim2.new(1, -172, 1, 0),
+				Position = UDim2.fromOffset(10, 0),
+				ZIndex = 4,
+				Parent = row,
+			})
+
+			if autoTagged then
+				newText({
+					Name = "Tag",
+					Text = "AUTO",
+					Font = THEME_FONT_BOLD,
+					TextSize = 9,
+					TextColor3 = theme.Accent,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					Size = UDim2.fromOffset(40, 28),
+					Position = UDim2.new(1, -158, 0, 0),
+					ZIndex = 4,
+					Parent = row,
+				})
+			end
+
+			local function rowButton(text, color, width, offsetFromRight, onClick)
+				local button = create("TextButton", {
+					Name = text,
+					Text = text,
+					Font = THEME_FONT_BOLD,
+					TextSize = 10,
+					TextColor3 = Color3.fromRGB(255, 255, 255),
+					BackgroundColor3 = color,
+					AutoButtonColor = false,
+					Size = UDim2.fromOffset(width, 20),
+					Position = UDim2.new(1, -offsetFromRight, 0.5, 0),
+					AnchorPoint = Vector2.new(0, 0.5),
+					ZIndex = 5,
+					Parent = row,
+				})
+				addCorner(button, UDim.new(0, 4))
+				button.MouseEnter:Connect(function()
+					tween(button, 0.12, { BackgroundColor3 = color:Lerp(Color3.new(1, 1, 1), 0.15) })
+				end)
+				button.MouseLeave:Connect(function()
+					tween(button, 0.12, { BackgroundColor3 = color })
+				end)
+				button.MouseButton1Click:Connect(function()
+					pcall(onClick)
+				end)
+				return button
+			end
+
+			rowButton("Delete", Color3.fromRGB(214, 72, 72), 46, 8, function()
+				openConfirm({
+					Title = "Delete configuration?",
+					Message = "Deleting '" .. name .. "' removes the file from disk. This cannot be undone.",
+					ConfirmText = "Delete",
+					Danger = true,
+					OnConfirm = function()
+						local ok, result = deleteConfiguration(name)
+						if not ok then
+							notifyConfig(result or "Deleting failed.")
+						else
+							if selectedConfig == name then selectedConfig = nil end
+							notifyConfig("'" .. name .. "' has been deleted.")
+						end
+						refreshConfigList()
+					end,
+				})
+			end)
+
+			rowButton("Load", theme.Accent, 44, 60, function()
+				local ok, result = loadConfigurationAs(name)
+				if not ok then
+					notifyConfig(result or "Loading failed.")
+					return
+				end
+				selectedConfig = name
+				setConfigName(name)
+				notifyConfig("'" .. name .. "' has been loaded.")
+				refreshConfigList()
+			end)
+
+			select.MouseEnter:Connect(function()
+				if not selected then tween(row, 0.15, { BackgroundColor3 = theme.SurfaceHover }) end
+			end)
+			select.MouseLeave:Connect(function()
+				if not selected then tween(row, 0.15, { BackgroundColor3 = theme.Surface }) end
+			end)
+			select.MouseButton1Click:Connect(function()
+				if selectedConfig == name then
+					--  Clicking the current selection clears it, so the field
+					--  can be used for a brand new name again.
+					selectedConfig = nil
+				else
+					selectedConfig = name
+					setConfigName(name)
+				end
+				refreshConfigList()
+			end)
+		end
+
 		refreshConfigList = function()
 			listHolder:ClearAllChildren()
 			addList(listHolder, { Padding = UDim.new(0, 4) })
 			local configs = listConfigurations()
-			if #configs == 0 then
+			local autoName = configState.fileName or "autocfg"
+			local autoPresent = configFileExists()
+
+			if #configs == 0 and not autoPresent then
 				newText({
 					Name = "Empty",
 					Text = "No saved configurations yet",
@@ -6236,9 +6716,10 @@ function XClient:CreateWindow(settings)
 				})
 				return
 			end
+
 			local savedHeading = newText({
 				Name = "Heading",
-				Text = "SAVED",
+				Text = "SAVED - click a row to select it",
 				Font = THEME_FONT_BOLD,
 				TextSize = 11,
 				TextColor3 = currentTheme.TextDim,
@@ -6246,15 +6727,16 @@ function XClient:CreateWindow(settings)
 				Parent = listHolder,
 			})
 			fitLabel(savedHeading, PANEL_WIDTH - 24, { MinSize = 9 })
+
+			--  The auto-saved file comes first and is tagged, so it is never
+			--  confused with a manually named configuration.
+			if autoPresent then
+				buildSavedRow(autoName, true)
+			end
 			for _, name in ipairs(configs) do
-				builders.Button(listHolder, ctx, {
-					Name = name,
-					Callback = function()
-						if loadConfigurationAs(name) then
-							XClient:Notify({ Title = "XClient Configurations", Content = "'" .. name .. "' has been loaded." })
-						end
-					end,
-				})
+				if name ~= autoName then
+					buildSavedRow(name, false)
+				end
 			end
 		end
 		refreshConfigList()
@@ -6428,6 +6910,8 @@ function XClient:CreateWindow(settings)
 		if not visible then
 			--  Popups live on the window, so dismiss any open one with it.
 			ctx.closePopup()
+			--  ... and any open confirmation dialog too.
+			if ctx.closeConfirm then ctx.closeConfirm() end
 			closeFlyout()
 			--  A hidden interface must not keep the keyboard: the open key
 			--  would be typed into an invisible field instead of toggling the

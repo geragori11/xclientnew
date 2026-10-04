@@ -351,21 +351,40 @@ XClient.Flags["aimbot"]:Set(true)    -- same as Toggle:Set(true)
   named configuration buttons keep working either way.
 * Configurations saved by the previous interface are read from the old
   `Configurations` folder too, and their exact value shape is understood.
+* **Per-module settings are always saved.** A row's `Settings = { ... }` table is
+  registered with the configuration system up front, so its nested flags exist
+  even when the module's gear flyout was never opened in this session. A config
+  loaded before the gear is opened is applied the moment the gear builds its rows.
+* Names are sanitised before they reach the filesystem (whitespace runs are
+  collapsed, `/ \ : * ? " < > |` and control characters are dropped, trailing
+  dots and spaces are trimmed, the result is capped at 64 characters). An empty
+  or unusable name is refused with a reason instead of failing silently.
 
 ```lua
 XClient:SaveConfiguration()            -- save to the configured file
 XClient:LoadConfiguration()            -- load the configured file
-XClient:SaveConfigurationAs("PvP")     -- named snapshot
-XClient:LoadConfigurationAs("PvP")
-XClient:DeleteConfiguration("PvP")
+local ok, name = XClient:SaveConfigurationAs("PvP")      -- true, name
+local ok, name = XClient:LoadConfigurationAs("PvP")      -- or false, reason
+local ok, name = XClient:DeleteConfiguration("PvP")
 XClient:ListConfigurations()           -- { "PvP", "Legit", ... }
 XClient:SetAutoSave(false)             -- stop the automatic writes
 XClient:GetAutoSave()                  -- current auto-save switch
 ```
 
-The topbar gear opens the built-in panel: theme picker, the auto-save switch,
-save / load / delete for the named configuration, the list of saved
-configurations and the interface keybind.
+`SaveConfigurationAs` / `LoadConfigurationAs` / `DeleteConfiguration` return
+`true, <name>` on success and `false, <reason>` on failure (the reason is a short
+sentence suitable for a notification). The first value is still the boolean older
+scripts check, so existing code keeps working.
+
+The topbar gear opens the built-in panel: theme picker, the auto-save switch, the
+configuration manager and the interface keybind. The manager lists every saved
+configuration under a `SAVED` heading, with the auto-saved file first and tagged
+`AUTO`. Clicking a row selects it (the row is highlighted and its name is copied
+into the field above); clicking the selected row again clears the selection. Each
+row has its own **Load** and **Delete** buttons, so a configuration can be loaded
+or removed without typing its name. **Saving over an existing name and deleting
+both open a confirmation dialog** (the deletion button is red), and the result of
+every action is reported truthfully — a failed write is never announced as saved.
 
 ---
 

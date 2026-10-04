@@ -49,11 +49,17 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   width track). The flyout is built from the same element builders and saved like
   any other flag; right clicking the gear does nothing.
 * **Built-in configuration system** — **auto-save is on by default** (a running
-  `autocfg` file is created and reloaded on the next join), plus
-  save / load / delete / list named configurations and autoload on start, in the
-  in-window configuration panel behind the topbar gear (which also holds the
-  theme picker, the font picker, the auto-save switch, the menu key and the
-  configuration manager).
+  `autocfg` file is created and reloaded on the next join), plus a full
+  save / load / delete manager in the in-window configuration panel behind the
+  topbar gear (which also holds the theme picker, the font picker, the auto-save
+  switch and the menu key). Saved configurations are listed with the auto-save
+  file tagged `AUTO`; clicking a row selects it (highlighted, and copied into the
+  name field) and each row carries its own **Load** / **Delete** buttons, so a
+  configuration can be loaded or removed without typing its name. Saving over an
+  existing name and deleting both ask for confirmation, names are sanitised to
+  what the filesystem accepts, and every result is reported truthfully (a failed
+  write is never announced as saved). Config values always cover **per-module
+  settings**, even for modules whose gear was never opened that session.
 * Three palettes (Neverlose, Midnight, Blood) plus the theme names old scripts
   use, and custom palette tables.
 * Named (Lucide) icons via `icons.lua`, Roblox asset ids, or plain URLs.
