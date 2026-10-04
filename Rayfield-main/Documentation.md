@@ -359,6 +359,11 @@ XClient.Flags["aimbot"]:Set(true)    -- same as Toggle:Set(true)
   collapsed, `/ \ : * ? " < > |` and control characters are dropped, trailing
   dots and spaces are trimmed, the result is capped at 64 characters). An empty
   or unusable name is refused with a reason instead of failing silently.
+* A value the build cannot express as JSON (a stray `Color3` or Instance left in
+  a descriptor, a widget the build does not describe) is **left out of the file**
+  rather than aborting the save, so one awkward flag can never cost every other
+  setting. The `{{R, G, B}}` colour shape is read back correctly whether a
+  descriptor hands over a `Color3` or an already packed table.
 
 ```lua
 XClient:SaveConfiguration()            -- save to the configured file

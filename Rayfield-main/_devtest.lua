@@ -1237,6 +1237,23 @@ check("ConfigurationSaving wrote automatically", isfile("XClient/Configurations/
 check("saved file mentions the flags", string.find(files["XClient/Configurations/Big Hub.rfld"], "toggleFlag") ~= nil)
 check("saved file shape uses R/G/B", string.find(files["XClient/Configurations/Big Hub.rfld"], "R") ~= nil)
 
+--  A single flag the build cannot describe must never sink the whole file: the
+--  save used to fail outright with "the current values could not be encoded"
+--  and write nothing.  The awkward flag is now left out instead.
+XClient.Flags["devAwkward"] = {
+	Flag = "devAwkward",
+	Type = "Awkward",
+	Value = "x",
+	Serialize = function() return Color3.fromRGB(1, 2, 3) end,
+}
+check("an unencodable flag no longer aborts the save", XClient:SaveConfigurationAs("Awkward") == true)
+check("the encodable values still reach the file",
+	string.find(files["XClient/Configurations/Awkward.rfld"], "toggleFlag") ~= nil)
+check("the unencodable flag is dropped instead",
+	string.find(files["XClient/Configurations/Awkward.rfld"], "devAwkward") == nil)
+XClient.Flags["devAwkward"] = nil
+XClient:DeleteConfiguration("Awkward")
+
 check("SaveConfigurationAs", XClient:SaveConfigurationAs("My Config") == true)
 check("named file written", isfile("XClient/Configurations/My Config.rfld"))
 local listed = false

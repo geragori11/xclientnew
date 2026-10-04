@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.7.8"
+XClient.Version = "1.7.9"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.7.8"
+XClient.Build = "1.7.9"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -5419,7 +5419,15 @@ end
 --  re-shadowing a live element on a later pass.
 local function settingInitialValue(descriptor, elementType)
 	if elementType == "ColorPicker" then
-		return descriptor.Color or descriptor.Default
+		local color = descriptor.Color
+		if color == nil then color = descriptor.Default end
+		if color == nil then color = descriptor.CurrentValue end
+		if color == nil then color = descriptor.Value end
+		--  A packed { R, G, B } table is as valid an input as a Color3 (typeof
+		--  keeps a Color3 itself, which some builds answer type() "table" for,
+		--  out of unpackColor).
+		if type(color) == "table" and typeof(color) ~= "Color3" then color = unpackColor(color) end
+		return color
 	elseif elementType == "Dropdown" then
 		local value = descriptor.CurrentOption
 		if value == nil then value = descriptor.CurrentValue end
@@ -5461,18 +5469,18 @@ function registerSettingShadow(ctx, descriptor)
 	local elementType = descriptor.Type or "Toggle"
 	descriptor.Type = elementType
 	local value = settingInitialValue(descriptor, elementType)
+	--  Spread the starting value into every field the serialiser and the real
+	--  builder read (CurrentValue / CurrentOption / CurrentKeybind / Color), so
+	--  a shadow saved before its gear was opened stores the real value rather
+	--  than a blank, and :Set below lands where the live row will look for it.
+	if value ~= nil then writeSettingValue(descriptor, elementType, value) end
 	descriptor.__xclientShadow = true
-	--  Only supply defaults: a descriptor the caller filled in itself keeps
-	--  its own Set / Serialize.
-	if type(descriptor.Serialize) ~= "function" then
-		descriptor.Serialize = function(self)
-			local current = settingInitialValue(self, self.Type or elementType)
-			if (self.Type or elementType) == "ColorPicker" then
-				return current and packColor(current) or nil
-			end
-			return current
-		end
-	end
+	--  No Serialize fallback on purpose.  serializeFlags() already knows every
+	--  primitive shape; for a widget it does not know (PlayerWidget, Crosshair,
+	--  ...) a shadow has nothing truthful to store, and inventing a value here
+	--  is what used to hand HttpService:JSONEncode a Color3 / table and make the
+	--  whole save report "could not be encoded".  The real builder installs its
+	--  own Serialize the moment the gear is opened.
 	if type(descriptor.Set) ~= "function" then
 		descriptor.Set = function(self, newValue)
 			writeSettingValue(self, self.Type or elementType, newValue)
@@ -5543,33 +5551,81 @@ local function configFileExists()
 	return configExists(configState.fileName) ~= nil
 end
 
+--  True when a value can survive HttpService:JSONEncode.  Roblox refuses
+--  functions, Instances, EnumItems and its own datatypes (Color3, Vector2, ...);
+--  a single one of those used to abort the whole save, so the manager reported
+--  "the current values could not be encoded" and wrote nothing at all.
+local function jsonSafe(value, depth)
+	depth = (depth or 0) + 1
+	if depth > 8 then return false end
+	local kind = type(value)
+	if kind == "number" or kind == "string" or kind == "boolean" then return true end
+	if kind ~= "table" then return false end
+	--  A table that typeof() names something else (Color3, Vector2, an
+	--  Instance, ...) is a Roblox datatype: JSONEncode refuses those too, and
+	--  some builds only reveal them through typeof.
+	if typeof and typeof(value) ~= "table" then return false end
+	for key, entry in pairs(value) do
+		local keyKind = type(key)
+		if keyKind ~= "number" and keyKind ~= "string" then return false end
+		if not jsonSafe(entry, depth) then return false end
+	end
+	return true
+end
+
+--  Accepts a Color3, an already packed { R, G, B } table, or anything unusable
+--  (which becomes white), so a stray value in a descriptor's Color field can
+--  never make packColor throw halfway through a save.
+local function safePackColor(value)
+	--  typeof is the only reliable test here: some Lua builds answer type()
+	--  with "table" for a Color3 too, and its R/G/B are 0..1 floats rather than
+	--  the packed 0..255 bytes a saved { R, G, B } table carries.
+	if type(value) ~= "table" or typeof(value) == "Color3" then
+		local ok, packed = pcall(packColor, value)
+		if ok and type(packed) == "table" then return packed end
+		return { R = 255, G = 255, B = 255 }
+	end
+	return {
+		R = math.floor((tonumber(value.R) or 255) + 0.5),
+		G = math.floor((tonumber(value.G) or 255) + 0.5),
+		B = math.floor((tonumber(value.B) or 255) + 0.5),
+	}
+end
+
 --  Collects the current state of every registered flag.
 local function serializeFlags()
 	local data = {}
 	for flag, element in pairs(XClient.Flags) do
-		if element.Flag == flag then
-			local elementType = element.Type
-			if elementType == "ColorPicker" then
-				data[flag] = packColor(element.Color or Color3.fromRGB(255, 255, 255))
-			elseif elementType == "Toggle" then
-				data[flag] = element.CurrentValue and true or false
-			elseif elementType == "Dropdown" then
-				local copy = {}
-				for i, option in ipairs(element.CurrentOption or {}) do copy[i] = option end
-				data[flag] = copy
-			elseif elementType == "Keybind" then
-				data[flag] = tostring(element.CurrentKeybind or "")
-			elseif elementType == "Input" then
-				data[flag] = tostring(element.CurrentValue or "")
-			elseif elementType == "Slider" then
-				data[flag] = element.CurrentValue
-			elseif type(element.Serialize) == "function" then
-				--  The extended widgets (section 9b) describe their own saved
-				--  shape: PlayerWidget -> region list, Crosshair -> { FOV, X, Y },
-				--  Analog -> { X, Y }, Stepper / Graph / Progress -> number, ...
-				local ok, serialized = pcall(element.Serialize, element)
-				if ok then data[flag] = serialized end
-			end
+		if type(element) == "table" and element.Flag == flag then
+			--  One awkward element must never sink the whole file: build its
+			--  value defensively, then drop it when it is not JSON (a widget the
+			--  build cannot describe, a colour it cannot read, ...).  Everything
+			--  else still reaches the file.
+			local ok, value = pcall(function()
+				local elementType = element.Type
+				if elementType == "ColorPicker" then
+					return safePackColor(element.Color)
+				elseif elementType == "Toggle" then
+					return element.CurrentValue and true or false
+				elseif elementType == "Dropdown" then
+					local copy = {}
+					for i, option in ipairs(element.CurrentOption or {}) do copy[i] = option end
+					return copy
+				elseif elementType == "Keybind" then
+					return tostring(element.CurrentKeybind or "")
+				elseif elementType == "Input" then
+					return tostring(element.CurrentValue or "")
+				elseif elementType == "Slider" then
+					return element.CurrentValue
+				elseif type(element.Serialize) == "function" then
+					--  The extended widgets (section 9b) describe their own saved
+					--  shape: PlayerWidget -> region list, Crosshair -> { FOV, X, Y },
+					--  Analog -> { X, Y }, Stepper / Graph / Progress -> number, ...
+					return element.Serialize(element)
+				end
+				return nil
+			end)
+			if ok and value ~= nil and jsonSafe(value) then data[flag] = value end
 		end
 	end
 	--  The shared favourite colour palette rides along under a reserved key so
@@ -5577,7 +5633,7 @@ local function serializeFlags()
 	local favorites = {}
 	for i = 1, FAVORITE_SLOTS do
 		local entry = XClient.FavoriteColors[i]
-		favorites[i] = (typeof(entry) == "Color3") and packColor(entry) or false
+		favorites[i] = (typeof(entry) == "Color3") and safePackColor(entry) or false
 	end
 	data.__favorite_colors = favorites
 	return data
@@ -5746,7 +5802,11 @@ local function listConfigurations()
 	local seen = {}
 	local folders = { configState.folder, LEGACY_CONFIG_ROOT .. "/Configurations" }
 	for _, folder in ipairs(folders) do
-		if isfolder(folder) then
+		--  isfolder is deliberately not trusted on its own: some executors
+		--  answer it badly for a path they have not opened yet, which left a
+		--  freshly saved configuration invisible in the list.  The listfiles
+		--  below is pcall'd, so a folder that really is missing is harmless.
+		do
 			local ok, files = pcall(listfiles, folder)
 			if ok and files then
 				for _, file in ipairs(files) do
@@ -6630,8 +6690,11 @@ function XClient:CreateWindow(settings)
 					BackgroundColor3 = color,
 					AutoButtonColor = false,
 					Size = UDim2.fromOffset(width, 20),
+					--  Anchored from the right edge: with a left anchor the
+					--  offsets pushed the buttons (the red Delete one most
+					--  visibly) out through the panel edge, leaving a sliver.
 					Position = UDim2.new(1, -offsetFromRight, 0.5, 0),
-					AnchorPoint = Vector2.new(0, 0.5),
+					AnchorPoint = Vector2.new(1, 0.5),
 					ZIndex = 5,
 					Parent = row,
 				})

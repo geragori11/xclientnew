@@ -58,7 +58,9 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
   configuration can be loaded or removed without typing its name. Saving over an
   existing name and deleting both ask for confirmation, names are sanitised to
   what the filesystem accepts, and every result is reported truthfully (a failed
-  write is never announced as saved). Config values always cover **per-module
+  write is never announced as saved; a value the build cannot encode is left out
+  of the file instead of failing the whole save). Config values always cover
+  **per-module
   settings**, even for modules whose gear was never opened that session.
 * Three palettes (Neverlose, Midnight, Blood) plus the theme names old scripts
   use, and custom palette tables.
