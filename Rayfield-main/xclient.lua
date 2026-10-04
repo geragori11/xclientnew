@@ -401,12 +401,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.7.0"
+XClient.Version = "1.7.1"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.7.0"
+XClient.Build = "1.7.1"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -7421,5 +7421,95 @@ end
 if getgenv then
 	getgenv().XClient = XClient
 end
+
+--=========================================================================
+--  15. AUTO-UPDATER
+--  Keeps the copy on disk fresh without ever touching the interface that is
+--  on screen. A single background task asks the loader
+--  (getgenv().XClientLoader) whether the version published on GitHub differs
+--  from the cached one and, when it does, downloads it with loader:Update().
+--  Nothing reloads mid-session - the refreshed file is picked up by the loader
+--  on the next injection, so the switch happens silently. Only two
+--  notifications are shown: one when a new version is found (and the download
+--  starts) and one when it has been stored. When xclient.lua is run on its own
+--  (no loader in the environment) the poller stays idle.
+--=========================================================================
+
+XClient.AutoUpdate         = true   -- false disables the poller entirely
+XClient.AutoUpdateDelay    = 10     -- seconds before the very first check
+XClient.AutoUpdateInterval = 150    -- seconds between checks (2.5 minutes)
+
+local autoUpdaterStarted = false
+
+local function startAutoUpdater()
+	if autoUpdaterStarted then return end
+	if not XClient.AutoUpdate then return end
+	autoUpdaterStarted = true
+
+	task.spawn(function()
+		--  Wait a moment before the first check: loader.lua publishes
+		--  getgenv().XClientLoader only after this file has finished running, so
+		--  the handle does not exist yet while we are still inside the loader.
+		task.wait(tonumber(XClient.AutoUpdateDelay) or 10)
+
+		local loader
+		if getgenv then
+			local ok, env = pcall(getgenv)
+			if ok and type(env) == "table" then loader = env.XClientLoader end
+		end
+		--  No loader in the environment -> xclient.lua was run directly and
+		--  there is nothing to update; stay quiet.
+		if type(loader) ~= "table" then return end
+
+		local announced  = nil   -- remote version already announced to the player
+		local downloaded = nil   -- remote version already pulled into the cache
+		local failedFor  = nil   -- remote version whose download last failed
+
+		while true do
+			local ok, remote, changed = pcall(function()
+				return loader:CheckForUpdate()
+			end)
+
+			if ok and remote and changed and remote ~= downloaded then
+				if remote ~= announced then
+					announced = remote
+					failedFor = nil
+					XClient:Notify({
+						Title    = "XClient Update",
+						Content  = "Version " .. tostring(remote) .. " found. Downloading...",
+						Duration = 5,
+					})
+				end
+
+				--  Flush the current state first, so the debounced autosave
+				--  cannot drop the edits made since the last write.
+				pcall(function() XClient:SaveConfiguration() end)
+
+				local dlOk, dlRes = pcall(function() return loader:Update() end)
+
+				if dlOk and dlRes then
+					downloaded = remote
+					XClient:Notify({
+						Title    = "XClient Update",
+						Content  = "Version " .. tostring(remote)
+							.. " downloaded. Changes apply after reinject.",
+						Duration = 8,
+					})
+				elseif failedFor ~= remote then
+					failedFor = remote
+					XClient:Notify({
+						Title    = "XClient Update",
+						Content  = "Download failed. Will retry later.",
+						Duration = 5,
+					})
+				end
+			end
+
+			task.wait(tonumber(XClient.AutoUpdateInterval) or 150)
+		end
+	end)
+end
+
+startAutoUpdater()
 
 return XClient
