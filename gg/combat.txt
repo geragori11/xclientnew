@@ -1,3 +1,9 @@
+-- =========================================================================
+-- Murder Mystery 2: Auto-Shoot + Manual Shoot (R) + HvH Mode
+-- + Murderer/Sheriff Exploits + Remote Kill Spoof + Silent Kill + Knife Aura
+-- + Proxy Knife Throw (Бросок по мышке Ctrl+I, по видимым целям)
+-- + Touch of Death / Проклятый игрок (смерть при приближении к игроку)
+-- =========================================================================
 
 return function(Window)
     local Players = game:GetService("Players")
@@ -26,9 +32,12 @@ return function(Window)
 
     -- --- НАСТРОЙКИ KNIFE AURA ---
     local KnifeAuraEnabled = false
+    local KnifeAuraMode = "Silent"        -- "Silent" | "Physical"
     local KnifeAuraRange = 30
     local KnifeAuraCooldown = 1.2
     local KnifeAuraNextUse = 0
+    local KnifeAuraVisibleCheck = true    -- проверять видимость цели
+    local KnifeAuraSilentSpawnDist = 1.5  -- дистанция спавна ножа от цели (Silent)
 
     -- --- НАСТРОЙКИ PROXY KNIFE THROW ---
     local ProxyAuraEnabled = false
@@ -54,6 +63,19 @@ return function(Window)
     local isKillingSheriff = false
     local isKillingTarget = false
     local SelectedPlayerName = ""
+
+    -- --- НАСТРОЙКИ АВТО-ОПЕРАЦИЙ (Murderer / Sheriff) ---
+    local AutoShootMurderEnabled = false
+    local AutoShootMurderCooldown = 0.5
+    local AutoShootMurderNextUse = 0
+
+    local AutoKillAllEnabled = false
+    local AutoKillAllCooldown = 1.0
+    local AutoKillAllNextUse = 0
+
+    local AutoKillSheriffEnabled = false
+    local AutoKillSheriffCooldown = 1.0
+    local AutoKillSheriffNextUse = 0
 
     local function Notify(Title, Text)
         pcall(function()
@@ -121,7 +143,7 @@ return function(Window)
     end
 
     -- ==========================================
-    -- 3. ПРОВЕРКА ВИДИМОСТИ (ОТ СЕБЯ И ОТ ДРУГОГО ИГРОКА)
+    -- 3. ПРОВЕРКА ВИДИМОСТИ
     -- ==========================================
     local function getVisiblePart(targetCharacter)
         local myChar = LocalPlayer.Character
@@ -314,7 +336,7 @@ return function(Window)
     end
 
     -- ==========================================
-    -- 5. REMOTE KILL SPOOF + БЕЗЗВУЧНОЕ УБИЙСТВО
+    -- 5. REMOTE KILL SPOOF
     -- ==========================================
     local function sendKillPacketsToTarget(targetPlayer, knife)
         if not targetPlayer or not targetPlayer.Character then return false end
@@ -399,7 +421,7 @@ return function(Window)
     end
 
     -- ==========================================
-    -- 6. BULLET-AT-HITBOX (ПОЯВЛЕНИЕ ПУЛИ В СПИНЕ / ХИТБОКСЕ)
+    -- 6. BULLET-AT-HITBOX
     -- ==========================================
     local function fireBulletAtTarget(targetCharacter, gun)
         if not targetCharacter or not gun then return false end
@@ -479,11 +501,14 @@ return function(Window)
     end
 
     -- ==========================================
-    -- 7. KNIFE THROW HvH, PROXY TARGET & PROXY MOUSE
+    -- 7. KNIFE THROW (Silent / Physical)
     -- ==========================================
-    local function fireKnifeThrowAt(targetCharacter, spawnDist)
+
+    -- SILENT: origin спавнится на линии игрок→цель в spawnDist от цели (в сторону игрока).
+    -- Так нож «приходит» из направления игрока, а не из спины/фронта цели.
+    local function fireKnifeThrowSilent(targetCharacter, spawnDist)
         if not targetCharacter then return false end
-        spawnDist = spawnDist or 0.2
+        spawnDist = spawnDist or 1.5
 
         local knife = getEquippedKnife()
         if not knife then return false end
@@ -493,17 +518,27 @@ return function(Window)
         local knifeThrown = events:FindFirstChild("KnifeThrown")
         if not knifeThrown then return false end
 
+        local myChar = LocalPlayer.Character
+        if not myChar then return false end
+        local myRoot = myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head")
+
         local mRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
-        if not mRoot then return false end
+        if not mRoot or not myRoot then return false end
 
         local velocity = mRoot.AssemblyLinearVelocity
-        local speed = velocity.Magnitude
 
         local ping = 0
         pcall(function() ping = LocalPlayer:GetNetworkPing() end)
         ping = math.clamp(ping, 0, 0.4)
 
-        local dir = (speed > 3) and velocity.Unit or mRoot.CFrame.LookVector
+        -- Направление = от игрока к цели (а не velocity цели — это и был баг «летит от спины»)
+        local toTargetVec = mRoot.Position - myRoot.Position
+        local dir
+        if toTargetVec.Magnitude > 0.1 then
+            dir = toTargetVec.Unit
+        else
+            dir = myRoot.CFrame.LookVector
+        end
 
         local parts = {}
         for _, name in ipairs({"Head", "UpperTorso", "Torso", "LowerTorso",
@@ -522,7 +557,8 @@ return function(Window)
 
         for _, part in ipairs(parts) do
             local predictedPos = part.Position + velocity * ping
-            local originPos = predictedPos + dir * spawnDist
+            -- origin = между игроком и целью, на spawnDist от цели в сторону игрока
+            local originPos = predictedPos - dir * spawnDist
             local originCFrame = CFrame.new(originPos, predictedPos)
             local targetCFrame = CFrame.new(predictedPos)
             pcall(function()
@@ -531,6 +567,52 @@ return function(Window)
         end
 
         return true
+    end
+
+    -- PHYSICAL: origin = рука игрока, нож реально летит к цели
+    local function fireKnifeThrowPhysical(targetCharacter)
+        if not targetCharacter then return false end
+
+        local knife = getEquippedKnife()
+        if not knife then return false end
+
+        local events = knife:FindFirstChild("Events")
+        if not events then return false end
+        local knifeThrown = events:FindFirstChild("KnifeThrown")
+        if not knifeThrown then return false end
+
+        local myChar = LocalPlayer.Character
+        if not myChar then return false end
+        local hand = myChar:FindFirstChild("RightHand")
+            or myChar:FindFirstChild("Head")
+            or myChar:FindFirstChild("HumanoidRootPart")
+
+        local mRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
+        if not hand or not mRoot then return false end
+
+        local velocity = mRoot.AssemblyLinearVelocity
+
+        local ping = 0
+        pcall(function() ping = LocalPlayer:GetNetworkPing() end)
+        ping = math.clamp(ping, 0, 0.4)
+
+        local predictedPos = mRoot.Position + velocity * ping
+        local originCFrame = CFrame.new(hand.Position, predictedPos)
+        local targetCFrame = CFrame.new(predictedPos)
+
+        pcall(function()
+            knifeThrown:FireServer(originCFrame, targetCFrame)
+        end)
+
+        return true
+    end
+
+    -- Диспетчер для Knife Aura
+    local function fireKnifeThrowAt(targetCharacter)
+        if KnifeAuraMode == "Physical" then
+            return fireKnifeThrowPhysical(targetCharacter)
+        end
+        return fireKnifeThrowSilent(targetCharacter, KnifeAuraSilentSpawnDist)
     end
 
     local function fireKnifeThrowFromProxy(proxyCharacter, targetCharacter)
@@ -597,7 +679,6 @@ return function(Window)
         return true
     end
 
-    -- Бросок ножа от лица прокси-игрока в произвольные координаты (курсор мыши)
     local function fireKnifeThrowFromProxyToPosition(proxyCharacter, targetPos)
         if not proxyCharacter or not targetPos then return false end
 
@@ -744,7 +825,6 @@ return function(Window)
         end)
     end
 
-    -- Обработка хоткея Ctrl + I для броска ножа в курсор мыши
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
         if input.KeyCode == Enum.KeyCode.I then
@@ -764,9 +844,6 @@ return function(Window)
     -- СОЗДАНИЕ UI
     -- ==========================================
 
-    -- ==========================================
-    -- СЕКЦИЯ: AIM / AUTO-SHOOT
-    -- ==========================================
     CombatTab:CreateSection("Aim / Auto-Shoot")
 
     CombatTab:CreateKeybind({
@@ -866,6 +943,77 @@ return function(Window)
                 CurrentValue = 0.25,
                 Flag = "HvHShootCooldown",
                 Callback = function(Value) HvHShootCooldown = Value end
+            }
+        }
+    })
+
+    -- ==========================================
+    -- СЕКЦИЯ: AUTO OPERATIONS
+    -- ==========================================
+    CombatTab:CreateSection("Auto Operations")
+
+    CombatTab:CreateToggle({
+        Name = "🔫 Auto Shoot Murder (авто-хитбокс по мардеру)",
+        CurrentValue = false,
+        Flag = "AutoShootMurderToggle",
+        Description = "Автоматически стреляет по Мардеру, пока он не умрёт",
+        Callback = function(Value)
+            AutoShootMurderEnabled = Value
+        end,
+        Settings = {
+            "⏱ Тайминги",
+            {
+                Type = "Slider",
+                Name = "Кулдаун выстрела (сек)",
+                Range = {0.1, 3},
+                Increment = 0.05,
+                CurrentValue = 0.5,
+                Flag = "AutoShootMurderCooldownSlider",
+                Callback = function(Value) AutoShootMurderCooldown = Value end
+            }
+        }
+    })
+
+    CombatTab:CreateToggle({
+        Name = "💀 Auto Kill All as Murder",
+        CurrentValue = false,
+        Flag = "AutoKillAllToggle",
+        Description = "Работает только если вы Мардер (есть нож)",
+        Callback = function(Value)
+            AutoKillAllEnabled = Value
+        end,
+        Settings = {
+            "⏱ Тайминги",
+            {
+                Type = "Slider",
+                Name = "Кулдаун (сек)",
+                Range = {0.3, 5},
+                Increment = 0.1,
+                CurrentValue = 1.0,
+                Flag = "AutoKillAllCooldownSlider",
+                Callback = function(Value) AutoKillAllCooldown = Value end
+            }
+        }
+    })
+
+    CombatTab:CreateToggle({
+        Name = "👮 Auto Kill Sheriff as Murder",
+        CurrentValue = false,
+        Flag = "AutoKillSheriffToggle",
+        Description = "Работает только если вы Мардер (есть нож)",
+        Callback = function(Value)
+            AutoKillSheriffEnabled = Value
+        end,
+        Settings = {
+            "⏱ Тайминги",
+            {
+                Type = "Slider",
+                Name = "Кулдаун (сек)",
+                Range = {0.3, 5},
+                Increment = 0.1,
+                CurrentValue = 1.0,
+                Flag = "AutoKillSheriffCooldownSlider",
+                Callback = function(Value) AutoKillSheriffCooldown = Value end
             }
         }
     })
@@ -1251,7 +1399,7 @@ return function(Window)
     })
 
     -- ==========================================
-    -- СЕКЦИЯ: KNIFE AURA
+    -- СЕКЦИЯ: KNIFE AURA (REWORK)
     -- ==========================================
     CombatTab:CreateSection("Knife Aura")
 
@@ -1261,7 +1409,19 @@ return function(Window)
         Flag = "KnifeAuraToggle",
         Callback = function(Value) KnifeAuraEnabled = Value end,
         Settings = {
-            "Параметры Aura",
+            "🎯 Режим работы",
+            {
+                Type = "Segment",
+                Name = "Режим Aura",
+                Options = { "Silent", "Physical" },
+                CurrentOption = "Silent",
+                Flag = "KnifeAuraMode",
+                Callback = function(Value)
+                    if type(Value) == "table" then Value = Value[1] end
+                    KnifeAuraMode = Value or "Silent"
+                end
+            },
+            "⚙ Параметры Aura",
             {
                 Type = "Slider",
                 Name = "Дальность Aura (studs)",
@@ -1279,6 +1439,24 @@ return function(Window)
                 CurrentValue = 1.2,
                 Flag = "KnifeAuraCooldown",
                 Callback = function(Value) KnifeAuraCooldown = Value end
+            },
+            {
+                Type = "Toggle",
+                Name = "Проверка видимости цели",
+                CurrentValue = true,
+                Flag = "KnifeAuraVisibleCheck",
+                Callback = function(Value) KnifeAuraVisibleCheck = Value end
+            },
+            "🎯 Silent mode",
+            {
+                Type = "Slider",
+                Name = "Дистанция спавна ножа от цели (Silent)",
+                Range = {0.5, 5},
+                Increment = 0.1,
+                CurrentValue = 1.5,
+                Flag = "KnifeAuraSilentSpawnDist",
+                Description = "Меньше — компактнее и незаметнее, больше — стабильнее проходит серверную валидацию",
+                Callback = function(Value) KnifeAuraSilentSpawnDist = Value end
             }
         }
     })
@@ -1314,7 +1492,7 @@ return function(Window)
     -- ЕДИНЫЙ ЦИКЛ
     -- ==========================================
     RunService.Heartbeat:Connect(function()
-        -- Touch of Death (Убийство игроков, подошедших к выбранному игроку)
+        -- Touch of Death
         if TouchOfDeathEnabled and os.clock() >= TouchOfDeathNextUse and ProxyPlayerName ~= "" then
             local proxyPlayer = Players:FindFirstChild(ProxyPlayerName)
             if proxyPlayer and proxyPlayer.Character then
@@ -1343,7 +1521,7 @@ return function(Window)
             end
         end
 
-        -- Proxy Knife Aura (Бросок от выбранного игрока по видимым и безопасным целям)
+        -- Proxy Knife Aura
         if ProxyAuraEnabled and os.clock() >= ProxyAuraNextUse and ProxyPlayerName ~= "" then
             local proxyPlayer = Players:FindFirstChild(ProxyPlayerName)
             if proxyPlayer and proxyPlayer.Character then
@@ -1383,7 +1561,7 @@ return function(Window)
             end
         end
 
-        -- Обычная Knife Aura (от самого себя)
+        -- Обычная Knife Aura (Silent | Physical)
         if KnifeAuraEnabled and os.clock() >= KnifeAuraNextUse then
             local char = LocalPlayer.Character
             local knife = char and char:FindFirstChild("Knife")
@@ -1397,7 +1575,7 @@ return function(Window)
                         if hum and hum.Health > 0 and root and myRoot then
                             local dist = (root.Position - myRoot.Position).Magnitude
                             if dist < nearestDist then
-                                if getVisiblePart(player.Character) then
+                                if not KnifeAuraVisibleCheck or getVisiblePart(player.Character) then
                                     nearest = player
                                     nearestDist = dist
                                 end
@@ -1406,14 +1584,73 @@ return function(Window)
                     end
                 end
                 if nearest and nearest.Character then
-                    if fireKnifeThrowAt(nearest.Character, 0.2) then
+                    if fireKnifeThrowAt(nearest.Character) then
                         KnifeAuraNextUse = os.clock() + KnifeAuraCooldown
                     end
                 end
             end
         end
 
-        -- Auto-Shoot
+        -- Auto Shoot Murder (Sheriff-подобный автобой по мардеру)
+        if AutoShootMurderEnabled and os.clock() >= AutoShootMurderNextUse then
+            local char = LocalPlayer.Character
+            if char then
+                local hasGun = findPlayerGun()
+                if hasGun then
+                    local murderer = findMurderer()
+                    if murderer and murderer.Character then
+                        local mHum = murderer.Character:FindFirstChildOfClass("Humanoid")
+                        if mHum and mHum.Health > 0 then
+                            AutoShootMurderNextUse = os.clock() + AutoShootMurderCooldown
+                            task.spawn(function()
+                                executeHitboxKill(murderer.Character, AutoShootEquip)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Auto Kill All as Murder
+        if AutoKillAllEnabled and os.clock() >= AutoKillAllNextUse then
+            local char = LocalPlayer.Character
+            local knife = char and char:FindFirstChild("Knife")
+            if knife then
+                AutoKillAllNextUse = os.clock() + AutoKillAllCooldown
+                local targets = {}
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player ~= LocalPlayer and player.Character then
+                        local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then table.insert(targets, player) end
+                    end
+                end
+                if #targets > 0 then
+                    task.spawn(function() spoofKillBurst(targets) end)
+                end
+            end
+        end
+
+        -- Auto Kill Sheriff as Murder
+        if AutoKillSheriffEnabled and os.clock() >= AutoKillSheriffNextUse then
+            local char = LocalPlayer.Character
+            local knife = char and char:FindFirstChild("Knife")
+            if knife then
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player ~= LocalPlayer and isSheriff(player) then
+                        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            AutoKillSheriffNextUse = os.clock() + AutoKillSheriffCooldown
+                            task.spawn(function()
+                                spoofKill(player, knife, SilentKillEnabled)
+                            end)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Auto-Shoot (обычный, по Мардеру)
         if not AutoShootEnabled or IsShooting then return end
 
         local char = LocalPlayer.Character
