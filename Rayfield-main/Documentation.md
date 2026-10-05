@@ -23,6 +23,13 @@ library and only asks the repository for a tiny version marker (see section 17):
 local XClient = loadstring(game:HttpGet("URL_TO/loader.lua"))()
 ```
 
+The library can also keep a script's features in **separate files on GitHub** and
+load them itself, instead of shipping one monolithic `main.lua` (see section 18):
+
+```lua
+XClient:InitModules(Window, { Modules = { { Name = "Combat", URL = "URL_TO/modules/combat.lua" } } })
+```
+
 ---
 
 ## 2. Creating a window
@@ -261,7 +268,7 @@ Tab:CreateGroupBox({
 -- returned: :Add(e)  :AddMany(list)  :Clear()  :SetTitle(text)
 --           :Set({ Name, Elements })  :Serialize()  :Load(values)
 ```
-A Neverlose style card that holds other elements — see **section 18**.
+A Neverlose style card that holds other elements — see **section 19**.
 
 ---
 
@@ -490,7 +497,7 @@ Elements added on top of the previous interface (all backwards compatible):
 | Analog stick | `Tab:CreateAnalog` | 16.9 |
 | Radar | `Tab:CreateRadar` | 16.10 |
 | Chips | `Tab:CreateChips` | 16.11 |
-| Group box card | `Tab:CreateGroupBox` | 18 |
+| Group box card | `Tab:CreateGroupBox` | 19 |
 
 ---
 
@@ -1121,7 +1128,176 @@ getgenv().XClientLoaderOptions = nil                 -- back to normal on the ne
 
 ---
 
-## 18. GroupBox (Neverlose style card)
+## 18. Module loader (external modules)
+
+Section 1 loads a single file and section 17 keeps that file on disk. The module
+loader goes one step further: it lets a script keep its actual features in
+**separate files on GitHub** and pull them in with one call, instead of shipping
+one monolithic `main.lua`. It is part of `xclient.lua` itself (source section
+`15b`), so there is nothing extra to download.
+
+```lua
+local XClient = loadstring(game:HttpGet("URL_TO/xclient.lua"))()
+
+XClient:InitModules(Window, { Modules = {
+    { Name = "Combat",  URL = "URL_TO/modules/combat.lua"  },
+    { Name = "Visuals", URL = "URL_TO/modules/visuals.lua" },
+}})
+```
+
+A module is an ordinary Lua chunk that returns one of:
+
+| It returns | Meaning |
+| --- | --- |
+| `function(XClient, Window, Options)` | the entry point, run for the window |
+| `{ Name = "Combat", Init = function(XClient, Window) ... end }` | a named module; `Run`, `Setup` and `Load` work as the entry point too |
+| nothing at all | a pure side-effect module: running the chunk *is* the load |
+
+A `Name` declared inside the module wins over the file name, so `combat.lua` may
+call itself `Combat` — that becomes the key used in the registry and in the cache.
+
+### 18.1 Loading and registering
+
+| Call | Purpose |
+| --- | --- |
+| `XClient:InitModules(window, opts)` | obtain every module and run its entry point; returns `loaded, failed` |
+| `XClient:LoadModule(url, opts)` | register one module immediately (download, compile, run its top-level chunk); returns `true, info` or `false, info` |
+
+| `InitModules` option | Default | Description |
+| --- | --- | --- |
+| `Modules` | the registry | list of `{ Name, URL }` (bare URL strings work too); omit it to run everything `LoadModule` registered |
+| `BundleURL` / `Bundle` | `ModuleOptions.BundleURL` | optional bundle file; `Bundle = false` skips it |
+| `Loading` | `true` | `false` skips the loading overlay |
+| `OnDone(loaded, failed)` | `nil` | called once when the run is over |
+
+`window` is optional — its `Root` (or `Frame` / `Container`) hosts the overlay and
+it is handed to every entry point.
+
+### 18.2 Configuration
+
+The loader keeps its settings in `XClient.ModuleOptions`; change them in place at
+any time with `XClient:SetModuleOptions(opts)`:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `Folder` | `"XClient/modules"` | cache folder inside the executor workspace |
+| `BundleURL` | `nil` | optional bundle file holding many modules |
+| `BundlePath` | `"XClient/modules/bundle.lua"` | where the bundle is cached |
+| `Retries` | `3` | download attempts per module |
+| `RetryDelay` | `0.6` | seconds; every attempt waits longer (`RetryDelay × attempt`) |
+| `FallbackRetries` | `5` | whole-module attempts (load + init) before skipping it |
+| `FallbackDelay` | `2` | seconds between those attempts |
+| `Offline` | `false` | never touch the network, use the cache only |
+| `Log` | `true` | print progress and failures to the console |
+
+```lua
+XClient:SetModuleOptions({ Folder = "XClient/modules", Log = false })
+```
+
+`LoadModule` / `InitModules` also accept per-module overrides, so one flaky module
+can be treated differently from the rest — `Name`, `Mirrors` (extra URLs tried in
+order), `Retries`, `RetryDelay`, `FallbackRetries`, `FallbackDelay`.
+
+### 18.3 Cache and integrity
+
+Every module is one plain file plus a checksum file, both inside `Folder`:
+
+| Path | Purpose |
+| --- | --- |
+| `XClient/modules/combat.lua` | the cached module source |
+| `XClient/modules/combat.hash` | its DJB2 checksum |
+
+The checksum is not a security feature — it only tells a freshly written cache file
+apart from a truncated one (a half-finished write, a disk hiccup, a stray editor
+save). Reading a module validates the pair, so a cache file whose checksum
+disagrees counts as **absent** and the module is downloaded again instead of being
+compiled from a corrupt copy.
+
+| Situation | What happens |
+| --- | --- |
+| First load | the source is downloaded, compiled, cached and its top-level chunk is run |
+| Download fails, cached copy valid | the cached copy is used and counted as `Cached` — a handful of bytes saved and an offline client still works |
+| Download fails, no cache | the module is skipped; the rest of the list keeps loading |
+| Cache file truncated or edited by hand | the checksum disagrees, so it is treated as if it did not exist |
+| `Offline = true` | no request at all: cache only, and a module with no cache is skipped |
+
+On the retry path the URL is cache-busted (`?t=<time>`), so a stale CDN copy cannot
+pin an old module, and the body still has to compile before it is accepted — a
+truncated download is retried instead of being cached as a broken module.
+
+### 18.4 Bundle
+
+Instead of one request per module, a **bundle** is a single file that returns a
+table of modules — handy for a whole feature set:
+
+```lua
+-- modules/bundle.lua
+return {
+    Combat  = function(XClient, Window) ... end,
+    Visuals = { Name = "Visuals", Init = function(XClient, Window) ... end },
+}
+```
+
+```lua
+XClient:SetModuleOptions({ BundleURL = "URL_TO/modules/bundle.lua" })
+XClient:InitModules(Window)                     -- the whole bundle in one request
+```
+
+Bundled entries are registered exactly like individually loaded modules, only
+marked as bundled (counted in `ModuleStats.Bundle`, cached as `BundlePath`), and
+they are already in memory when their turn comes so they never hit the network
+twice. The bundle is optional: when it cannot be reached the modules registered
+individually still load.
+
+### 18.5 Loading overlay
+
+While the modules are being prepared a small overlay based on the boot HUD
+(section 15) is shown over the window — the same corner brackets, a status line
+(`Combat (1/3)`) and a percentage — and it closes itself when the last module is
+done:
+
+```lua
+XClient:InitModules(Window, { Loading = false })  -- no overlay at all
+```
+
+It is built inside a `pcall`, so a client that refuses the UI can never stop the
+modules from loading, and the shimmer animates inside the engine (no Lua loop is
+left running for the duration of the module phase).
+
+### 18.6 Inspecting and maintaining
+
+| Member | Description |
+| --- | --- |
+| `XClient.Modules` | `name -> { fn, url, opts, source }` for everything registered |
+| `XClient.ModuleOrder` | the names, in registration order |
+| `XClient.ModuleStats` | `{ Updated, Cached, Bundle, Failed }` |
+| `XClient:SetModuleOptions(opts)` | merge options; returns the live table |
+| `XClient:LoadModule(url, opts)` | load one module now |
+| `XClient:InitModules(window, opts)` | load and run everything; returns `loaded, failed` |
+| `XClient:ListModules()` | `{ Name, URL, Source }` per module, in order |
+| `XClient:ClearModuleCache()` | delete the cached `.lua` / `.hash` files; returns how many were removed |
+| `XClient:PrintModuleStats()` | log the four counters and return the table |
+
+```lua
+XClient:SetModuleOptions({ Log = true })
+local loaded, failed = XClient:InitModules(Window)
+XClient:PrintModuleStats()          -- Updated=4 Cached=1 Bundle=2 Failed=0
+XClient:ClearModuleCache()          -- next run downloads everything again
+```
+
+Everything the loader registers lives in `XClient.Modules`, and the loader only
+ever appends to it, so a script may pre-seed a module or read the registry at any
+time. Nothing in this section is mandatory: a script that never calls it behaves
+exactly as before.
+
+The cache decisions above (checksum rejection, offline mode, the two retry
+stages, the bundle and the overlay) are covered offline by `_moduletest.lua`
+(`lua _moduletest.lua`) — 54 checks against a fake file system and a stub
+`game:HttpGet`.
+
+---
+
+## 19. GroupBox (Neverlose style card)
 
 `Tab:CreateGroupBox` builds a card — a bluish tinted container with a caption and
 a hairline header that holds other elements. Every `Type` the builders know goes

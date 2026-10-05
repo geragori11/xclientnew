@@ -22,6 +22,9 @@
 		* Built-in configuration system (save / load / delete / list / autoload)
 		  with an in-window configuration panel behind the topbar gear
 		* Procedural gear icon, procedural colour picker, no remote assets
+		* Built-in module loader (section 15b): keep each feature in its own
+		  GitHub file and mount them all with XClient:InitModules(Window),
+		  with disk caching, DJB2-checked cache files and per-module retries
 
 	Compatibility
 		The public API is a drop-in match for the interface this project used
@@ -401,12 +404,12 @@ local FAVORITE_SLOTS = 9
 local XClient = {}
 XClient.__index = XClient
 
-XClient.Version = "1.7.9"
+XClient.Version = "1.8.0"
 --  Manual build tag. It is the number loader.lua compares against the one
 --  published in version.txt next to this file, so bump it whenever you push a
 --  change and then run `lua _mkversion.lua` to keep both in sync (the loader
 --  warns when they disagree).
-XClient.Build = "1.7.9"
+XClient.Build = "1.8.0"
 XClient.Name = "XClient"
 XClient.Themes = Themes
 XClient.Flags = {}
@@ -7219,6 +7222,9 @@ function XClient:CreateWindow(settings)
 	end
 
 	local Window = {}
+	--  Attach point for anything that has to sit inside the window frame (the
+	--  module loader's progress overlay, for instance).
+	Window.Root = root
 	XClient.Windows[#XClient.Windows + 1] = Window
 
 	local function buildRecord(record, container)
@@ -8058,5 +8064,814 @@ local function startAutoUpdater()
 end
 
 startAutoUpdater()
+
+--=========================================================================
+--  15b. MODULE LOADER
+--  Keeps the actual "cheat" in small external files on GitHub instead of one
+--  monolithic main.lua: every module is fetched once, cached on disk (with a
+--  DJB2 checksum, so a half-written cache file is detected and not trusted)
+--  and then run against the window.
+--
+--  A module is an ordinary Lua chunk that returns either
+--
+--      function(XClient, Window, Options)   -- a plain entry point, or
+--      { Name = "Combat", Init = function(XClient, Window) ... end }
+--
+--  Nothing is mandatory: a chunk that returns nothing at all is treated as a
+--  pure side-effect module and simply counts as loaded.
+--
+--      XClient:SetModuleOptions({ Folder = "XClient/modules" })
+--      XClient:LoadModule("URL/combat.lua", { Name = "Combat" })
+--      XClient:InitModules(Window)
+--
+--  or in one call, straight from a list of URLs:
+--
+--      XClient:InitModules(Window, { Modules = {
+--          { Name = "Combat",  URL = "URL/combat.lua" },
+--          { Name = "Visuals", URL = "URL/visuals.lua" },
+--      }})
+--
+--  The loader is deliberately forgiving. A download that will not go through
+--  is retried (Retries x RetryDelay, widening); if the module still refuses to
+--  load, the whole thing is retried a few more times with a longer delay
+--  (FallbackRetries x FallbackDelay) and only then skipped - one broken or
+--  missing module can never take the rest of the menu down. While the modules
+--  are being prepared a small loading overlay (the same HUD style the window
+--  boots with) reports progress and closes itself when the last one is done.
+--=========================================================================
+
+--  The public tables. Everything the loader registers lives here, so a script
+--  may read them (or pre-seed them); the loader only ever appends.
+XClient.Modules     = XClient.Modules or {}
+XClient.ModuleOrder = XClient.ModuleOrder or {}
+XClient.ModuleStats = XClient.ModuleStats or { Updated = 0, Cached = 0, Bundle = 0, Failed = 0 }
+
+XClient.ModuleOptions = XClient.ModuleOptions or {
+	Folder          = "XClient/modules",   -- cache folder (per executor workspace)
+	BundleURL       = nil,                 -- optional bundle.lua holding many modules
+	BundlePath      = "XClient/modules/bundle.lua",
+	Retries         = 3,                   -- download attempts per module
+	RetryDelay      = 0.6,                 -- seconds; every attempt waits longer
+	FallbackRetries = 5,                   -- whole-module attempts before skipping
+	FallbackDelay   = 2,                   -- seconds between those attempts
+	Offline         = false,               -- never touch the network, cache only
+	Log             = true,                -- print progress / failures to the console
+}
+
+do
+	local Options     = XClient.ModuleOptions
+	local Modules     = XClient.Modules
+	local ModuleOrder = XClient.ModuleOrder
+	local ModuleStats = XClient.ModuleStats
+
+	--  Console logger --------------------------------------------------------
+	--  One switch (Options.Log) silences the whole loader, so it stays quiet
+	--  in a shipped menu but can be turned back on for debugging.
+	local function moduleLog(fmt, ...)
+		if not Options.Log then return end
+		local message = fmt
+		if select("#", ...) > 0 then
+			local ok, formatted = pcall(string.format, fmt, ...)
+			message = ok and formatted or tostring(fmt)
+		else
+			message = tostring(fmt)
+		end
+		if type(print) == "function" then
+			pcall(print, "[XClient modules] " .. message)
+		end
+	end
+
+	--  DJB2 checksum ---------------------------------------------------------
+	--  Not a security feature: it only tells a freshly written cache file from
+	--  a truncated one (a half-finished write, a disk hiccup, a stray editor
+	--  save). 32 bit and folded back with a modulus so the result is a stable
+	--  decimal string a small text file can hold.
+	local function djb2(source)
+		local hash = 5381
+		for index = 1, #source do
+			hash = (hash * 33 + string.byte(source, index)) % 4294967296
+		end
+		return string.format("%.0f", hash)
+	end
+
+	--  Naming ----------------------------------------------------------------
+	--  A name has to be usable as a file name and as a table key, so anything
+	--  that is not alphanumeric (or . _ -) is folded into an underscore.
+	local function sanitizeName(name)
+		local clean = tostring(name or "module"):gsub("[^%w%._%-]", "_")
+		if clean == "" then clean = "module" end
+		return clean
+	end
+
+	--  Falls back to the last path segment of the URL (".../combat.lua" ->
+	--  Cache files -----------------------------------------------------------
+	--  Each module is one "<name>.lua" plus a "<name>.hash" holding its DJB2
+	--  checksum. Reading validates the pair, so a cache file that was cut
+	--  short (or edited by hand) counts as if it did not exist at all.
+	local function readCachedFile(path, hashPath)
+		if type(readfile) ~= "function" or type(isfile) ~= "function" then return nil end
+		if not isfile(path) then return nil end
+		local ok, source = pcall(readfile, path)
+		if not ok or type(source) ~= "string" or source == "" then return nil end
+		if hashPath and isfile(hashPath) then
+			local savedOk, saved = pcall(readfile, hashPath)
+			if savedOk and type(saved) == "string" then
+				local expected = saved:gsub("%s+", "")
+				if expected ~= "" and expected ~= djb2(source) then
+					return nil
+				end
+			end
+		end
+		return source
+	end
+
+	local function writeCachedFile(path, hashPath, source)
+		if not filesystemAvailable() or type(source) ~= "string" or source == "" then return false end
+		ensureFolder(string.match(path, "^(.*)/[^/]*$") or "")
+		local ok = pcall(writefile, path, source)
+		if ok and hashPath then
+			pcall(writefile, hashPath, djb2(source))
+		end
+		return ok
+	end
+
+	local function moduleCachePath(name) return Options.Folder .. "/" .. sanitizeName(name) .. ".lua" end
+	local function moduleHashPath(name)  return Options.Folder .. "/" .. sanitizeName(name) .. ".hash" end
+	local function readModuleCache(name)  return readCachedFile(moduleCachePath(name), moduleHashPath(name)) end
+	local function writeModuleCache(name, source) return writeCachedFile(moduleCachePath(name), moduleHashPath(name), source) end
+
+	--  HTTP ------------------------------------------------------------------
+	--  Same ladder the rest of the interface uses: game:HttpGet first (it is
+	--  the one every executor answers), then the request-style APIs. A reply
+	--  that looks like an error page is never accepted as source code.
+	local function usableBody(body, minLength)
+		return type(body) == "string"
+			and #body >= (minLength or 50)
+			and not body:find("404: Not Found", 1, true)
+			and not body:find("<!DOCTYPE html>", 1, true)
+	end
+
+	local function requestModuleHTTP(url)
+		if type(url) ~= "string" or url == "" then return nil end
+
+		if type(game) == "table" and type(game.HttpGet) == "function" then
+			local ok, body = pcall(function() return game:HttpGet(url) end)
+			if ok and usableBody(body) then return body end
+			ok, body = pcall(function() return game:HttpGet(url, true) end)
+			if ok and usableBody(body) then return body end
+		end
+
+		local custom = (syn and syn.request) or (http and http.request) or http_request or request
+		if type(custom) == "function" then
+			local ok, reply = pcall(custom, { Url = url, Method = "GET" })
+			if ok and type(reply) == "table" and reply.StatusCode == 200 and usableBody(reply.Body) then
+				return reply.Body
+			end
+		end
+		return nil
+	end
+
+	--  Every URL that should be tried for a module, in order: the plain URL,
+	--  then each mirror, and - from the second attempt on - cache-busted
+	--  clones of all of them, so a stale CDN copy cannot pin an old module.
+	local function candidateURLs(url, opts, bust)
+		local primaries, list, seen = {}, {}, {}
+		local function push(candidate)
+			if type(candidate) ~= "string" or candidate == "" or seen[candidate] then return end
+			seen[candidate] = true
+			list[#list + 1] = candidate
+		end
+		push(url)
+		if opts and type(opts.Mirrors) == "table" then
+			for _, mirror in ipairs(opts.Mirrors) do push(mirror) end
+		end
+		if bust then
+			primaries[#primaries + 1] = url
+			if opts and type(opts.Mirrors) == "table" then
+				for _, mirror in ipairs(opts.Mirrors) do primaries[#primaries + 1] = mirror end
+			end
+			local stamp = tostring(os and os.time or 0)
+			for _, candidate in ipairs(primaries) do
+				local separator = candidate:find("?", 1, true) and "&" or "?"
+				push(candidate .. separator .. "t=" .. stamp)
+			end
+		end
+		return list
+	end
+
+	--  "combat"), so a module without an explicit Name still gets a sane key.
+	local function nameFromURL(url)
+		local path = tostring(url or ""):gsub("[%?#].*$", "")
+		local file = string.match(path, "([^/\\]+)$") or "module"
+		file = file:gsub("%.lua$", "")
+		return sanitizeName(file)
+	end
+
+	--  Waiting ---------------------------------------------------------------
+	--  `task.wait` is the Luau name; a plain `wait` is the fallback. Both are
+	--  optional, so a bare environment simply does not pause.
+	local function pause(seconds)
+		if not seconds or seconds <= 0 then return end
+		if task and type(task.wait) == "function" then
+			task.wait(seconds)
+		elseif type(wait) == "function" then
+			wait(seconds)
+		end
+	end
+
+	--  Compiling -------------------------------------------------------------
+	local function tryCompile(source, name)
+		if type(source) ~= "string" or source == "" then return nil, "empty source" end
+		if type(loadstring) ~= "function" then return nil, "this executor has no loadstring" end
+		local chunk, compileError = loadstring(source, "@" .. sanitizeName(name) .. ".lua")
+		if type(chunk) ~= "function" then return nil, tostring(compileError) end
+		return chunk
+	end
+
+	--  Downloading -----------------------------------------------------------
+	--  One fetch of one module: every candidate URL, tried `Retries` times
+	--  with a widening delay (RetryDelay * attempt, i.e. 0.6 / 1.2 / 1.8s by
+	--  default). Only a body that compiles is accepted, so a truncated
+	--  download is retried instead of being cached as a broken module.
+	local function fetchModuleSource(url, opts, name)
+		local attempts = math.floor(tonumber(opts and opts.Retries) or Options.Retries or 3)
+		if attempts < 1 then attempts = 1 end
+		local baseDelay = tonumber(opts and opts.RetryDelay) or Options.RetryDelay or 0.6
+		local lastError = "the module could not be downloaded"
+
+		for attempt = 1, attempts do
+			for _, candidate in ipairs(candidateURLs(url, opts, attempt > 1)) do
+				local body = requestModuleHTTP(candidate)
+				if body then
+					local chunk, compileError = tryCompile(body, name)
+					if chunk then return body, chunk end
+					lastError = "compile error: " .. tostring(compileError)
+				end
+			end
+			if attempt < attempts then
+				pause(baseDelay * attempt)
+			end
+		end
+		return nil, lastError
+	end
+
+	--  Entry point -----------------------------------------------------------
+	--  A module chunk may return a function (the entry point), a table with
+	--  { Name, Init } (or Run / Setup / Load), or nothing at all for a pure
+	--  side-effect module. Everything is normalised to `fn` + `name`.
+	local function resolveModule(result, fallbackName)
+		if type(result) == "function" then
+			return result, fallbackName
+		end
+		if type(result) == "table" then
+			local name = result.Name or fallbackName
+			local fn = result.Init or result.Run or result.Setup or result.Load
+			return (type(fn) == "function" and fn or nil), tostring(name)
+		end
+		return nil, fallbackName
+	end
+
+	--  Registering -----------------------------------------------------------
+	--  Load (or re-use) one module and put it in the registry. `countFailure`
+	--  stays false while InitModules is still retrying a module, so one that
+	--  eventually succeeds is never counted as failed along the way.
+	local function attemptLoad(url, opts, countFailure)
+		opts = type(opts) == "table" and opts or {}
+		local cacheName = sanitizeName(opts.Name or nameFromURL(url))
+		local name = cacheName
+		local info = { Name = name, URL = url, Source = nil, Cached = false }
+
+		if type(url) ~= "string" or url == "" then
+			info.Error = "no URL given"
+			if countFailure then ModuleStats.Failed = ModuleStats.Failed + 1 end
+			moduleLog("%s: no URL given, skipping", name)
+			return false, info
+		end
+
+		local source, sourceKind, chunk
+		local cachedSource = readModuleCache(cacheName)
+
+		if Options.Offline then
+			if not cachedSource then
+				info.Error = "offline and no cached copy"
+				if countFailure then ModuleStats.Failed = ModuleStats.Failed + 1 end
+				moduleLog("%s: offline and nothing cached, skipping", name)
+				return false, info
+			end
+			source, sourceKind = cachedSource, "cache"
+			chunk = tryCompile(source, cacheName)
+		else
+			local remoteSource, fetchError = fetchModuleSource(url, opts, cacheName)
+			if remoteSource then
+				source, sourceKind = remoteSource, "network"
+				chunk = tryCompile(source, cacheName)
+			elseif cachedSource then
+				source, sourceKind = cachedSource, "cache"
+				chunk = tryCompile(source, cacheName)
+				moduleLog("%s: download failed (%s), using the cached copy", name, tostring(fetchError))
+			else
+				info.Error = tostring(fetchError)
+				if countFailure then ModuleStats.Failed = ModuleStats.Failed + 1 end
+				moduleLog("%s: %s", name, info.Error)
+				return false, info
+			end
+		end
+
+		if not chunk then
+			info.Error = "the source does not compile"
+			if countFailure then ModuleStats.Failed = ModuleStats.Failed + 1 end
+			moduleLog("%s: %s", name, info.Error)
+			return false, info
+		end
+
+		local ran, result = pcall(chunk)
+		if not ran then
+			info.Error = "runtime error: " .. tostring(result)
+			if countFailure then ModuleStats.Failed = ModuleStats.Failed + 1 end
+			moduleLog("%s: %s", name, info.Error)
+			return false, info
+		end
+
+		local fn, resolvedName = resolveModule(result, name)
+		name = sanitizeName(resolvedName or name)
+		info.Name = name
+		info.Source = sourceKind
+		info.Cached = (sourceKind == "cache")
+		info.Hash = djb2(source)
+
+		local wasRegistered = Modules[name] ~= nil
+		Modules[name] = { fn = fn, url = url, opts = opts, source = sourceKind }
+		if not wasRegistered then
+			ModuleOrder[#ModuleOrder + 1] = name
+			if sourceKind == "cache" then
+				ModuleStats.Cached = ModuleStats.Cached + 1
+			else
+				ModuleStats.Updated = ModuleStats.Updated + 1
+			end
+		end
+
+		if sourceKind == "network" and writeModuleCache(cacheName, source) then
+			info.Cached = true
+		end
+
+		return true, info
+	end
+
+	--  Bundle ----------------------------------------------------------------
+	--  One file that returns a table of modules, so a whole feature set can be
+	--  a single request. Entries are registered exactly like individually
+	--  loaded modules - only `source` marks them as bundled.
+	local function registerBundleModules(result, bundleURL)
+		local entries = result
+		if type(result) == "table" and type(result.Modules) == "table" then
+			entries = result.Modules
+		end
+		if type(entries) ~= "table" then return 0 end
+
+		local added = 0
+		for key, entry in pairs(entries) do
+			if type(key) == "string" then
+				local fn, resolvedName = resolveModule(entry, key)
+				local name = sanitizeName(resolvedName or key)
+				local already = Modules[name] ~= nil
+				Modules[name] = { fn = fn, url = bundleURL, opts = { Bundle = true }, source = "bundle" }
+				if not already then
+					ModuleOrder[#ModuleOrder + 1] = name
+					ModuleStats.Bundle = ModuleStats.Bundle + 1
+					added = added + 1
+				end
+			end
+		end
+		return added
+	end
+
+	--  Fetch, cache and unroll the bundle. It is optional: when the bundle
+	--  cannot be reached the modules registered individually still load.
+	local function loadBundle(bundleURL, opts)
+		if type(bundleURL) ~= "string" or bundleURL == "" then return 0 end
+		local path, hashPath = Options.BundlePath, Options.BundlePath .. ".hash"
+		local source, fromNetwork = nil, false
+
+		if not Options.Offline then
+			local fetched = fetchModuleSource(bundleURL, opts, "bundle")
+			if fetched then
+				source, fromNetwork = fetched, true
+			end
+		end
+		if not source then
+			source = readCachedFile(path, hashPath)
+		end
+		if not source then
+			moduleLog("bundle: could not be obtained, skipping it")
+			return 0
+		end
+
+		local chunk = tryCompile(source, "bundle")
+		if not chunk then
+			moduleLog("bundle: the source does not compile, skipping it")
+			return 0
+		end
+		local ran, result = pcall(chunk)
+		if not ran then
+			moduleLog("bundle: runtime error (%s)", tostring(result))
+			return 0
+		end
+
+		if fromNetwork then
+			writeCachedFile(path, hashPath, source)
+		end
+		local added = registerBundleModules(result, bundleURL)
+		moduleLog("bundle: registered %d module(s)", added)
+		return added
+	end
+
+	--  Running ---------------------------------------------------------------
+	--  Run one module's entry point, retrying the whole load + init a few
+	--  times with a longer delay before giving up on it. A module that never
+	--  makes it through is skipped - one broken module never breaks the menu.
+	local function initOne(spec, window, overlay, total, index)
+		local opts = type(spec.opts) == "table" and spec.opts or {}
+		local url = spec.url
+		local name = sanitizeName(spec.name or opts.Name or nameFromURL(url))
+		local attempts = math.floor(tonumber(opts.FallbackRetries) or Options.FallbackRetries or 5)
+		if attempts < 1 then attempts = 1 end
+		local delay = tonumber(opts.FallbackDelay) or Options.FallbackDelay or 2
+
+		for attempt = 1, attempts do
+			if overlay then
+				overlay:SetProgress(math.max(index - 1, 0), total,
+					string.format("%s (%d/%d)", name, attempt, attempts))
+			end
+
+			local record = spec.preloaded and Modules[name] or nil
+			local ok, info
+
+			if record then
+				--  Supplied by the bundle: nothing to download, just run it.
+				ok, info = true, { Name = name, URL = url, Source = "bundle" }
+			else
+				ok, info = attemptLoad(url, opts, false)
+			end
+
+			if ok then
+				local target = Modules[(info and info.Name) or name]
+				local fn = target and target.fn
+				if not fn then
+					return true, info          -- pure side-effect module
+				end
+				local ran, runError = pcall(fn, XClient, window, opts)
+				if ran then return true, info end
+				moduleLog("%s: init error (%s), retrying", name, tostring(runError))
+				if info then info.Error = "init error: " .. tostring(runError) end
+			elseif info then
+				moduleLog("%s: %s", name, tostring(info.Error))
+			end
+
+			if attempt < attempts then
+				pause(delay)
+			end
+		end
+
+		ModuleStats.Failed = ModuleStats.Failed + 1
+		moduleLog("%s: given up after %d attempt(s), skipping it", name, attempts)
+		return false, { Name = name, URL = url, Error = "exhausted retries" }
+	end
+
+	--  Loading overlay -------------------------------------------------------
+	--  A trimmed copy of the window's boot screen, so the animation the menu
+	--  already shows also covers the module phase. It is built inside a pcall:
+	--  a client that refuses the UI can never stop the modules from loading.
+	local function later(seconds, callback)
+		if task and type(task.delay) == "function" then
+			task.delay(seconds, callback)
+		elseif type(callback) == "function" then
+			callback()
+		end
+	end
+
+	local function buildModuleOverlay(parent)
+		if not parent then return nil end
+
+		local ok, api = pcall(function()
+			local theme = currentTheme or (Themes and Themes.Neverlose) or {}
+			local background = theme.Background or Color3.fromRGB(16, 16, 18)
+			local accent     = theme.Accent or Color3.fromRGB(0, 178, 255)
+			local text       = theme.Text or Color3.fromRGB(233, 233, 238)
+			local muted      = theme.TextMuted or Color3.fromRGB(140, 140, 150)
+			local track      = theme.SliderTrack or Color3.fromRGB(40, 40, 47)
+
+			local splash = newFrame({
+				Name = "ModuleLoader",
+				BackgroundColor3 = background,
+				BackgroundTransparency = 0.05,
+				Size = UDim2.fromScale(1, 1),
+				Parent = parent,
+			})
+			splash.ZIndex = 80
+			addCorner(splash, UDim.new(0, 10))
+
+			--  HUD corner brackets, exactly like the boot screen.
+			local corners = { { 0, 0, 1, 1 }, { 0, 0, -1, 1 }, { 0, 1, 1, -1 }, { 0, 1, -1, -1 } }
+			for _, corner in ipairs(corners) do
+				local anchor = Vector2.new(corner[3] > 0 and 0 or 1, corner[4] > 0 and 0 or 1)
+				local position = UDim2.new(corner[1], corner[3] * 12, corner[2], corner[4] * 12)
+				local horizontal = newFrame({
+					Name = "Bracket", BackgroundColor3 = accent,
+					Size = UDim2.fromOffset(16, 2), Position = position,
+					AnchorPoint = anchor, Parent = splash,
+				})
+				horizontal.ZIndex = 81
+				local vertical = newFrame({
+					Name = "Bracket", BackgroundColor3 = accent,
+					Size = UDim2.fromOffset(2, 16), Position = position,
+					AnchorPoint = anchor, Parent = splash,
+				})
+				vertical.ZIndex = 81
+			end
+
+			local title = newText({
+				Name = "Title",
+				Text = tostring(XClient.Name or "XClient") .. " Modules",
+				TextSize = 18, Font = THEME_FONT_BOLD, TextColor3 = text,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				Size = UDim2.new(1, -60, 0, 22),
+				Position = UDim2.new(0, 30, 0.5, -48),
+				Parent = splash,
+			})
+			title.ZIndex = 82
+
+			local status = newText({
+				Name = "Status",
+				Text = "Preparing modules",
+				TextSize = 12, TextColor3 = muted,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				Size = UDim2.new(1, -60, 0, 16),
+				Position = UDim2.new(0, 30, 0.5, -10),
+				Parent = splash,
+			})
+			status.ZIndex = 82
+
+			local bar = newFrame({
+				Name = "BarTrack", BackgroundColor3 = track,
+				Size = UDim2.new(1, -60, 0, 6),
+				Position = UDim2.new(0, 30, 0.5, 16),
+				Parent = splash,
+			})
+			bar.ZIndex = 82
+			addCorner(bar, UDim.new(1, 0))
+
+			local fill = newFrame({
+				Name = "BarFill", BackgroundColor3 = accent,
+				Size = UDim2.fromScale(0, 1),
+				Parent = bar,
+			})
+			fill.ZIndex = 83
+			addCorner(fill, UDim.new(1, 0))
+
+			local shimmer = newFrame({
+				Name = "Shimmer", BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+				BackgroundTransparency = 0.6,
+				Size = UDim2.fromOffset(70, 6),
+				Position = UDim2.new(0, -80, 0, 0),
+				Parent = bar,
+			})
+			shimmer.ZIndex = 84
+			addCorner(shimmer, UDim.new(1, 0))
+
+			local percent = newText({
+				Name = "Percent", Text = "0%",
+				TextSize = 11, Font = THEME_FONT_BOLD, TextColor3 = accent,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Size = UDim2.new(1, -60, 0, 14),
+				Position = UDim2.new(0, 30, 0.5, 28),
+				Parent = splash,
+			})
+			percent.ZIndex = 82
+
+			--  The shimmer repeats inside the engine itself, so no Lua loop is
+			--  left running for the duration of the module phase.
+			if TweenService then
+				pcall(function()
+					local info = TweenInfo.new(0.9, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1, false)
+					TweenService:Create(shimmer, info, { Position = UDim2.new(1, 10, 0, 0) }):Play()
+				end)
+			end
+
+			tween(splash, 0.18, { BackgroundTransparency = 0.02 })
+			if type(fitLabel) == "function" and WINDOW_WIDTH then
+				fitLabel(title, WINDOW_WIDTH - 120, { MaxSize = 18, MinSize = 12 })
+				fitLabel(status, WINDOW_WIDTH - 120, { MaxSize = 12, MinSize = 10 })
+			end
+
+			local overlay = { Splash = splash }
+
+			function overlay:SetProgress(done, total, label)
+				if not (splash and splash.Parent) then return end
+				local ratio = 0
+				if total and total > 0 then
+					ratio = math.floor(done / total * 100 + 0.5) / 100
+					if ratio < 0 then ratio = 0 elseif ratio > 1 then ratio = 1 end
+				end
+				fill.Size = UDim2.fromScale(ratio, 1)
+				percent.Text = string.format("%d%%", math.floor(ratio * 100 + 0.5))
+				if label then
+					status.Text = tostring(label)
+					if type(fitLabel) == "function" and WINDOW_WIDTH then
+						fitLabel(status, WINDOW_WIDTH - 120, { MaxSize = 12, MinSize = 10 })
+					end
+				end
+			end
+
+			function overlay:Close()
+				if not (splash and splash.Parent) then return end
+				tween(splash, 0.25, { BackgroundTransparency = 1 })
+				tween(title, 0.25, { TextTransparency = 1 })
+				tween(status, 0.25, { TextTransparency = 1 })
+				tween(percent, 0.25, { TextTransparency = 1 })
+				tween(bar, 0.25, { BackgroundTransparency = 1 })
+				tween(fill, 0.25, { BackgroundTransparency = 1 })
+				tween(shimmer, 0.25, { BackgroundTransparency = 1 })
+				later(0.3, function()
+					if splash and splash.Parent then splash:Destroy() end
+				end)
+			end
+
+			return overlay
+		end)
+
+		if ok and type(api) == "table" then return api end
+		moduleLog("the loading overlay could not be created (%s)", tostring(api))
+		return nil
+	end
+
+	--  Public API ------------------------------------------------------------
+	--  Fill the option table in place, so a script can change the cache folder
+	--  or turn logging off at any time. Unknown keys are kept (opts.Mirrors and
+	--  the like), which is why it is a plain merge.
+	function XClient:SetModuleOptions(opts)
+		if type(opts) ~= "table" then return Options end
+		for key, value in pairs(opts) do
+			Options[key] = value
+		end
+		return Options
+	end
+
+	--  Register one module: download (or read from cache), compile and run its
+	--  top-level chunk right away. Returns true plus an info table, or false
+	--  plus an info table carrying the reason. `opts` may hold Name, Mirrors,
+	--  and per-module Retries / RetryDelay / FallbackRetries / FallbackDelay.
+	function XClient:LoadModule(url, opts)
+		return attemptLoad(url, opts, true)
+	end
+
+	--  Every module the loader knows about, in registration order.
+	function XClient:ListModules()
+		local list = {}
+		for _, name in ipairs(ModuleOrder) do
+			local record = Modules[name]
+			if record then
+				list[#list + 1] = { Name = name, URL = record.url, Source = record.source }
+			end
+		end
+		return list
+	end
+
+	--  Delete the cached copies so the next load has to hit the network (or
+	--  the bundle) again. The registry itself is untouched.
+	function XClient:ClearModuleCache()
+		local removed = 0
+		if type(delfile) ~= "function" then return removed end
+
+		local function remove(path)
+			if type(isfile) ~= "function" or not isfile(path) then return end
+			if pcall(delfile, path) then removed = removed + 1 end
+		end
+
+		local scanned = false
+		if type(listfiles) == "function" then
+			local ok, files = pcall(listfiles, Options.Folder)
+			if ok and type(files) == "table" then
+				scanned = true
+				for _, file in ipairs(files) do
+					local path = tostring(file)
+					if not path:find("[/\\]") then
+						path = Options.Folder .. "/" .. path
+					end
+					if path:match("%.lua$") or path:match("%.hash$") then
+						remove(path)
+					end
+				end
+			end
+		end
+
+		if not scanned then
+			for _, name in ipairs(ModuleOrder) do
+				remove(moduleCachePath(name))
+				remove(moduleHashPath(name))
+			end
+			remove(Options.BundlePath)
+			remove(Options.BundlePath .. ".hash")
+		end
+		return removed
+	end
+
+	--  One line with the four counters, and the same table back for scripts.
+	function XClient:PrintModuleStats()
+		local stats = ModuleStats
+		local line = string.format("Updated=%d Cached=%d Bundle=%d Failed=%d",
+			stats.Updated or 0, stats.Cached or 0, stats.Bundle or 0, stats.Failed or 0)
+		if type(print) == "function" then
+			pcall(print, "[XClient modules] " .. line)
+		end
+		return stats
+	end
+
+	--  Prepare every module and run its entry point.
+	--      window   optional; forwarded to the modules (and the overlay parent)
+	--      opts.Modules   list of { Name, URL } (or bare URL strings) to load
+	--                     instead of whatever LoadModule registered
+	--      opts.BundleURL / opts.Bundle (false to skip, a string to use)
+	--      opts.Loading (false to skip the overlay), opts.OnDone(loaded, failed)
+	--  Returns the number of modules that loaded and the number that failed.
+	function XClient:InitModules(window, opts)
+		opts = type(opts) == "table" and opts or {}
+
+		local parent
+		if type(window) == "table" then
+			parent = window.Root or window.Frame or window.Container
+		end
+		if not parent then parent = screenGui end
+
+		local bundleURL = opts.BundleURL
+		if opts.Bundle == false then
+			bundleURL = nil
+		elseif type(opts.Bundle) == "string" then
+			bundleURL = opts.Bundle
+		elseif not bundleURL then
+			bundleURL = Options.BundleURL
+		end
+		if bundleURL then
+			loadBundle(bundleURL, opts)
+		end
+
+		local specs = {}
+		if type(opts.Modules) == "table" then
+			for _, item in ipairs(opts.Modules) do
+				if type(item) == "string" then
+					specs[#specs + 1] = { url = item, opts = {} }
+				elseif type(item) == "table" then
+					specs[#specs + 1] = {
+						url = item.URL or item.url,
+						opts = item,
+						name = item.Name or item.name,
+					}
+				end
+			end
+		else
+			for _, name in ipairs(ModuleOrder) do
+				local record = Modules[name]
+				if record then
+					specs[#specs + 1] = {
+						name = name,
+						url = record.url,
+						opts = record.opts or {},
+						preloaded = (record.source == "bundle"),
+					}
+				end
+			end
+		end
+
+		local total = #specs
+		local overlay
+		if opts.Loading ~= false then
+			overlay = buildModuleOverlay(parent)
+			if overlay then overlay:SetProgress(0, total, "Preparing modules") end
+		end
+
+		local loaded, failed = 0, 0
+		for index, spec in ipairs(specs) do
+			local ok = initOne(spec, window, overlay, total, index)
+			if ok then
+				loaded = loaded + 1
+			else
+				failed = failed + 1
+			end
+			if overlay then
+				overlay:SetProgress(index, total, spec.name or spec.url or "module")
+			end
+		end
+
+		if overlay then
+			overlay:SetProgress(total, total, "Ready")
+			overlay:Close()
+		end
+
+		moduleLog("done: %d loaded, %d failed, %d module(s) registered", loaded, failed, #ModuleOrder)
+		if type(opts.OnDone) == "function" then
+			callSafe(opts.OnDone, loaded, failed)
+		end
+		return loaded, failed
+	end
+end
 
 return XClient

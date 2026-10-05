@@ -43,6 +43,11 @@ same `XClient.Flags` registry, same `.rfld` configuration files.
 * **Loading animation** — a CS style boot sequence (corner brackets, a bar that
   fills while a shimmer sweeps it, a percentage counter and a stage list) that
   fades out once the interface is up; the window itself slides into place.
+* **Module loader** — keep the actual features in separate files on GitHub and pull
+  them in with one call: `XClient:InitModules(Window, { Modules = { ... } })`.
+  Modules are cached on disk with a checksum, downloads are retried twice over,
+  and a module that refuses to load is skipped instead of taking the menu down
+  (`Documentation.md` section 18).
 * **Per module gear** — give a row a `Settings = { ... }` table and a gear icon
   appears; **left click** slides the full height settings flyout in from the
   **left** of the window (with a stacked slider layout — caption above a full
@@ -145,6 +150,30 @@ Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
 `Documentation.md` section 17 covers the configuration and the helper methods
 (`GetVersion`, `CheckForUpdate`, `Update`, `ClearCache`).
 
+### Module loader (optional)
+
+A script can keep its features in separate files — a `modules/` folder next to the
+library, say — and let the library pull them in, instead of one monolithic
+`main.lua`:
+
+```lua
+XClient:InitModules(Window, { Modules = {
+    { Name = "Combat",  URL = "URL_TO/modules/combat.lua"  },
+    { Name = "Visuals", URL = "URL_TO/modules/visuals.lua" },
+}})
+```
+
+Each module is an ordinary chunk that returns its entry point
+(`function(XClient, Window)`) or a `{ Name = "Combat", Init = ... }` table; a chunk
+that returns nothing at all is a pure side-effect module. Modules are cached in
+`XClient/modules/<name>.lua` beside a `.hash` checksum, downloads are retried
+(`Retries` × `RetryDelay`, then the whole module `FallbackRetries` ×
+`FallbackDelay`) and one that still refuses to load is skipped, so a single broken
+file never breaks the menu. An optional `bundle.lua` holds many modules in one
+request, and a small HUD overlay reports progress while they load.
+`Documentation.md` section 18 has the settings and the full API (`LoadModule`,
+`InitModules`, `ListModules`, `ClearModuleCache`, `PrintModuleStats`).
+
 ## Files
 
 | File | Purpose |
@@ -157,6 +186,7 @@ Point `Loader.Config.User` / `Repo` / `Branch` in `loader.lua` at your fork.
 | `icons.lua` | optional Lucide icon sheets used by `XClient.Icons` |
 | `_devtest.lua` | development harness: runs the library inside a small Roblox shim (`lua _devtest.lua`) |
 | `_loadertest.lua` | development harness: checks `loader.lua`'s cache/update decisions offline (`lua _loadertest.lua`) |
+| `_moduletest.lua` | development harness: checks the module loader's cache/retry/overlay decisions offline (`lua _moduletest.lua`) |
 | `_mkversion.lua` | development tool: writes `version.txt` from `xclient.lua`'s build tag (`lua _mkversion.lua [--check]`) |
 | `_leakcheck.lua` | development tool: run it **in an executor** next to a live script to see what keeps growing (connections, GC objects, windows, flags) |
 | `LICENSE` | licence |

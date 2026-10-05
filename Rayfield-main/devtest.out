@@ -1,0 +1,590 @@
+== 1. loading xclient.lua ==
+  ok   library table returned
+  ok   Flags registry
+  ok   Theme namespace
+  ok   Notify available before CreateWindow
+== 2. CreateWindow with the old example settings ==
+  ok   window returned
+  ok   Window:CreateTab
+  ok   Window.ModifyTheme
+  ok   Window:SaveConfiguration
+  ok   notifications flushed
+  ok   ScreenGui + window frame created
+  ok   loading animation shown
+  ok   loading bar exists
+  ok   loading bar animates to full
+  ok   loading shimmer + percentage
+  ok   loading title + subtitle
+== 3. tabs (positional args, including Ext) ==
+  ok   tabs returned
+  ok   Ext tab page hidden
+  ok   first tab is active
+  ok   tab switch
+== 4. section / button / label / paragraph / divider ==
+  ok   section has :Set
+  ok   section rename
+  ok   button returned
+  ok   button callback fired
+  ok   button rename
+  ok   label has :Set
+  ok   label text updated
+  ok   label with icon + colour
+  ok   paragraph has :Set
+  ok   paragraph updated
+  ok   divider hidden
+  ok   divider shown
+== 4b. group box (Neverlose style card) ==
+  ok   group box returned
+  ok   group box API
+  ok   group box built every child
+  ok   a plain string became a section
+  ok   children registered their flags
+  ok   rows inside the card drop their own background
+  ok   a group box can hold a group box
+  ok   the nested flag is registered too
+  ok   :Add grows the card
+  ok   :SetTitle renames the card
+  ok   :Serialize reads a toggle
+  ok   :Serialize reads a slider
+  ok   :Serialize reaches the nested group
+  ok   :Load restores a toggle
+  ok   :Load reaches the nested group
+  ok   :Set replaced the children
+  ok   :Set set the old flags free
+  ok   :Clear empties the card
+  ok   :Clear unregistered the last flag
+  ok   :Clear emptied the body
+== 5. toggle (old CurrentValue + Flag + Callback contract) ==
+  ok   CurrentValue exposed
+  ok   flag registered in the global registry
+  ok   Set fires callback
+  ok   Set updates CurrentValue
+  ok   registry sees the same table
+  ok   user click flips the value
+  ok   user click fires callback
+== 6. slider (Range / Increment / Suffix) ==
+  ok   Range normalised
+  ok   CurrentValue honoured
+  ok   Suffix kept
+  ok   Set fires callback
+  ok   Set updates CurrentValue
+  ok   upper clamp
+  ok   lower clamp
+  ok   Range still readable
+== 7. dropdown (CurrentOption array, multi, Refresh, popup clicking) ==
+  ok   CurrentOption is an array
+  ok   Options kept
+  ok   dropdown popup created
+  ok   dropdown list created
+  ok   dropdown options rendered
+  ok   clicking an option updates CurrentOption
+  ok   callback received the array
+  ok   single select popup closed
+  ok   Set accepts a string
+  ok   Set keeps a single option
+  ok   Refresh replaced the options
+  ok   stale selections dropped
+  ok   multi select keeps several options
+  ok   multi select keeps the popup open
+  ok   every row carries a tick, shown or not
+  ok   tick is shown the moment the option is picked
+  ok   picked row is repainted in place
+  ok   unticking drops the option straight away
+  ok   unticked row hides its tick straight away
+  ok   unticked row is repainted as well
+  ok   popup closed again
+== 8. input (PlaceholderText / CurrentValue / RemoveTextAfterFocusLost) ==
+  ok   placeholder alias
+  ok   callback on focus lost
+  ok   CurrentValue updated
+  ok   text kept when RemoveTextAfterFocusLost is false
+  ok   Set updates the box
+  ok   Set fires callback
+  ok   text cleared when requested
+== 9. keybind (string key, hold to interact) ==
+  ok   CurrentKeybind exposed
+  ok   pressing the bound key fires the callback
+  ok   processed input ignored
+  ok   Set rebinds
+  ok   hold callback got true
+  ok   hold callback got false
+  ok   the Hold keybind object is unused
+== 10. colour picker ==
+  ok   Color exposed
+  ok   Set updates the colour
+  ok   Set fires callback
+  ok   picker popup created
+  ok   saturation/value area
+  ok   a finished colour drag gives its input handlers back
+  ok   dragging the picker changed the colour
+  ok   saturation shade fades left -> right
+  ok   value shade runs top -> bottom
+  ok   value shade is clear at the top and black at the bottom
+  ok   a full value parks the marker on the clear edge of the shade
+  ok   no value parks the marker on the black edge of the shade
+== 11. per module gear + left settings flyout ==
+  ok   gear button created for rows with Settings
+  ok   flyout panel exists
+  ok   flyout is visible after clicking the gear
+  ok   flyout body populated
+  ok   nested setting registered a flag
+  ok   nested slider registered a flag
+  ok   nested setting is controllable
+  ok   clicking the gear again closes the flyout
+  ok   reopening the gear does not leak its input handlers (grew by 0)
+== 12. configuration system (same file layout as before) ==
+  ok   ConfigurationSaving wrote automatically
+  ok   saved file mentions the flags
+  ok   saved file shape uses R/G/B
+  ok   an unencodable flag no longer aborts the save
+  ok   the encodable values still reach the file
+  ok   the unencodable flag is dropped instead
+  ok   SaveConfigurationAs
+  ok   named file written
+  ok   ListConfigurations finds it
+  ok   values changed before loading
+  ok   LoadConfigurationAs
+  ok   toggle restored
+  ok   slider restored
+  ok   dropdown restored
+  ok   input restored
+  ok   keybind restored
+  ok   colour restored
+  ok   legacy configuration loads
+  ok   legacy toggle
+  ok   legacy slider
+  ok   legacy dropdown
+  ok   legacy keybind
+  ok   legacy input
+  ok   legacy colour packed as R/G/B
+  ok   configuration in the old folder loads
+  ok   old folder toggle
+  ok   old folder slider
+  ok   old folder keybind
+  ok   old folder config is listed
+  ok   DeleteConfiguration
+  ok   file removed
+  ok   deleting twice returns false
+  ok   XClient:LoadConfiguration
+== 12b. favourite colours, multi drop-down helper and auto-save ==
+  ok   FavoriteSlots exposed
+  ok   SetFavoriteColor stores a colour
+  ok   GetFavoriteColor reads it back
+  ok   GetFavoriteColors returns a table
+  ok   out-of-range slot refused
+  ok   non-colour value refused
+  ok   ClearFavoriteColor empties a slot
+  ok   palette written with the configuration
+  ok   palette cleared before loading
+  ok   palette restored on load
+  ok   CreateMultiDropdown returns a dropdown
+  ok   multi helper forces MultipleOptions on
+  ok   multi helper registered a flag
+  ok   multi helper keeps several options
+  ok   GetAutoSave defaults to true
+  ok   SetAutoSave(false)
+  ok   preferences file written
+  ok   preferences remember the switch
+  ok   SetAutoSave(true)
+== 13. themes ==
+  ok   ModifyTheme (dot call, as in the old examples)
+  ok   ModifyTheme (colon call)
+  ok   unknown theme returns false
+  ok   custom theme table accepted
+  ok   theme namespace populated
+  ok   elements survived the rebuild
+  ok   elements still controllable after a theme change
+  ok   tab:Refresh runs
+== 15. topbar: settings button, config panel, minimise ==
+  ok   topbar exists
+  ok   settings button exists
+  ok   settings flyout opened
+  ok   theme dropdown in the panel
+  ok   config name input in the panel
+  ok   save button in the panel
+  ok   panel saved a configuration file
+  ok   panel listed the new configuration
+  ok   deleting a configuration asks for confirmation
+  ok   panel deleted the configuration
+  ok   the confirmation closed again
+  ok   loading a missing configuration does not error
+  ok   settings button toggles the panel closed
+  ok   minimise shrinks the window
+  ok   restore expands the window again
+== 16. named / sprite icons ==
+  ok   sprite icon resolved
+  ok   sprite rectangle offset
+  ok   sprite rectangle size
+  ok   plain named icon resolved
+  ok   icon can be replaced with an asset id
+  ok   unknown icon clears the image
+== 17. fonts and caption fitting ==
+  ok   default font profile is CS
+  ok   font profiles exposed
+  ok   CS face applied to a row title
+  ok   short caption keeps the full size
+  ok   caption not wrapped when it fits
+  ok   long caption keeps the full text
+  ok   long caption wraps instead of clipping
+  ok   long caption font is reduced
+  ok   row grows for the wrapped caption
+  ok   label caption measured and fitted
+  ok   description fitted as well
+  ok   SetFont switches the profile
+  ok   rebuilt rows use the classic face
+  ok   classic profile has no size offset
+  ok   unknown profile rejected
+  ok   profile kept after a rejected switch
+  ok   custom profile accepted
+  ok   a profile with a custom font face still builds
+  ok   the custom face reaches new elements
+  ok   switching back clears the custom face
+  ok   back on CS
+== 18. default menu open key ==
+  ok   library default open key
+  ok   open key registered as a flag
+  ok   Window:GetOpenKey
+  ok   K hides the menu
+  ok   K shows the menu again
+  ok   SetOpenKey(F5) accepted
+  ok   open key updated everywhere
+  ok   F5 hides the menu
+  ok   F5 shows the menu
+  ok   the previous key is inert now
+  ok   SetOpenKey takes an EnumItem
+  ok   the saved flag follows
+  ok   config style rebind
+  ok   Window:SetOpenKey
+  ok   Space accepted as the open key
+  ok   the saved flag keeps the member name
+  ok   Space hides the menu
+  ok   Space shows the menu
+  ok   the readme's RightShift is accepted
+  ok   RightShift hides the menu
+  ok   RightShift shows the menu
+  ok   an EnumItem resolves to the member name
+  ok   open key back to K
+  ok   a CamelCase CurrentKeybind is kept
+  ok   the Space bind fires
+  ok   Set takes an EnumItem
+  ok   settings panel lists the open key
+  ok   open key row is a keybind box
+  ok   settings panel hints the current key
+  ok   rebinding from the panel works
+  ok   open key restored
+== 18b. keystrokes in text fields and old key spellings ==
+  ok   Enum.KeyCode can be enumerated
+  ok   Enum.KeyCode is case sensitive
+  ok   members keep their casing
+  ok   a lower case key resolves
+  ok   the saved flag follows the canonical name
+  ok   the lower case bind hides the menu
+  ok   the lower case bind shows the menu
+  ok   a save with the qualified spelling loads
+  ok   the qualified spelling is canonicalised
+  ok   the restored bind hides the menu
+  ok   the restored bind shows the menu
+  ok   a save with the upper case spelling loads
+  ok   the upper case spelling keeps the bind
+  ok   an unreadable key is refused
+  ok   an unreadable saved value keeps the bind
+  ok   an empty value still means no key bound
+  ok   the open key is back
+  ok   the config name field exists
+  ok   the field owns the keyboard
+  ok   typing a space does not toggle the menu
+  ok   typing does not fire a keybind
+  ok   the keyboard is handed back
+  ok   the keybind fires again
+  ok   the open key hides the menu again
+  ok   hiding the menu releases the field
+  ok   the open key still toggles
+  ok   closing the panel releases the field
+  ok   save uses the name that is on screen
+  ok   the live name can be deleted again
+  ok   LiveUpdate hears the keystrokes
+  ok   Set still fires the callback once
+  ok   the field owns the keyboard while typing
+  ok   a press inside the field keeps the keyboard
+  ok   a press on a button hands the keyboard back
+  ok   the button still acts on the name that was on screen
+  ok   the bind is armed
+  ok   the open key toggles the interface again
+  ok   the field grabbed the keyboard again
+  ok   a respawn hands the keyboard back
+  ok   state restored for the rest of the run
+== 19. PlayerWidget ==
+  ok   player widget returned
+  ok   six regions exposed
+  ok   initial selection applied
+  ok   region lookup is case insensitive
+  ok   Skin option applied at build time
+  ok   rig drawn procedurally
+  ok   body parts exist
+  ok   player widget registered as a flag
+  ok   widget.Highlight.Head = true repaints
+  ok   caption follows the selection
+  ok   widget.Highlight.All = false clears
+  ok   empty selection caption
+  ok   SetRegion selects a region
+  ok   clicking a body part highlights it
+  ok   click fires the callback
+  ok   widget.Skin.Torso reads back
+  ok   skin colour reaches the picture
+  ok   unhighlighted parts use the skin colour
+  ok   :Set(list) applies a selection
+  ok   :Serialize matches the selection
+  ok   :Clear empties the selection
+  ok   AllowMultiple = false replaces the selection
+  ok   spaced region aliases work
+== 19b. AvatarPreview ==
+  ok   avatar preview returned
+  ok   six regions exposed
+  ok   avatar registered as a flag
+  ok   viewport frame created
+  ok   a camera drives the viewport
+  ok   a procedural R6 rig was built
+  ok   widget.Highlight.Torso repaints
+  ok   caption follows the selection
+  ok   widget.Highlight.All = false clears
+  ok   SetRegion selects a region
+  ok   highlight paints the part neon (ESP tint)
+  ok   clearing restores the solid material
+  ok   widget.Skin.Torso reaches the part
+  ok   widget.Skin.Torso reads back
+  ok   Rotate moves the camera
+  ok   wheel over the viewport zooms in
+  ok   wheel away from the viewport is ignored
+  ok   SetZoom stores the factor
+  ok   SetZoom clamps to the maximum
+  ok   ResetCamera restores the defaults
+  ok   :Set(list) applies a selection
+  ok   :Serialize matches the selection
+  ok   :Clear empties the selection
+  ok   SetModel swaps in the given avatar
+  ok   ...with freshly cloned parts
+  ok   SetTarget / SetUserId tolerate junk
+== 20. extra widgets: crosshair / graph / progress / stepper ==
+  ok   crosshair returned
+  ok   fov circle drawn
+  ok   crosshair dot clamped into the pad
+  ok   SetFOV updates the value
+  ok   SetFOV grows the circle
+  ok   SetOffset moves the dot
+  ok   caption shows the state
+  ok   crosshair :Set(table)
+  ok   crosshair serialises
+  ok   fov clamped to MaxFOV
+  ok   dragging the pad does not error
+  ok   graph picks up the sample count
+  ok   Push records the latest sample
+  ok   the history keeps every sample
+  ok   bars grow with the values
+  ok   graph serialises to a number
+  ok   Clear resets the graph
+  ok   progress can run indeterminate
+  ok   Set moves the bar
+  ok   the fill follows the value
+  ok   percentage label updated
+  ok   Tween reaches the target
+  ok   SetRatio uses the 0-1 scale
+  ok   Stop halts the animation
+  ok   progress serialises to a number
+  ok   stepper starts at Min
+  ok   Step adds one increment
+  ok   value text shows the suffix
+  ok   Increment works
+  ok   Decrement works
+  ok   the + button works
+  ok   the - button works
+  ok   value clamped to Max
+  ok   stepper serialises to a number
+== 21. extra widgets: segment / wheel / analog / radar / chips / image ==
+  ok   segment picks the current option
+  ok   segment buttons drawn
+  ok   segment paints the active button
+  ok   segment :Set(name)
+  ok   clicking a segment selects it
+  ok   segment serialises to a string
+  ok   an unknown option clears the selection
+  ok   wheel current option
+  ok   wheel shows three rows
+  ok   wheel highlights the middle row
+  ok   Next moves forward
+  ok   Next wraps around
+  ok   Previous wraps back
+  ok   the up chevron works
+  ok   SetIndex selects by position
+  ok   wheel serialises to a string
+  ok   analog stores the vector
+  ok   analog reports the magnitude
+  ok   analog knob moved
+  ok   analog is active above the deadzone
+  ok   Center resets the stick
+  ok   analog serialises
+  ok   blip added
+  ok   blip drawn
+  ok   the blip list respects Max
+  ok   SetBlips replaces the list
+  ok   Clear empties the radar
+  ok   Blips option applied at build time
+  ok   Marked option applied at build time
+  ok   chips are a multi select
+  ok   chip toggled on
+  ok   chips :Set(list)
+  ok   chips registered under their own type
+  ok   chips serialise to a list
+  ok   chip buttons drawn
+  ok   picture drawn from the asset id
+  ok   custom point stored
+  ok   marker set
+  ok   marker dot drawn
+  ok   marker sits on its point
+  ok   lower case marker variable works
+  ok   picture serialises the markers
+  ok   SetMarkers replaces the markers
+  ok   ClearMarkers empties the picture
+  ok   tint applied
+== 22. new widgets inside a module settings flyout ==
+  ok   module flyout opened
+  ok   flyout captions are fitted
+  ok   player widget inside the flyout
+  ok   stepper inside the flyout
+  ok   progress inside the flyout
+  ok   segment inside the flyout
+  ok   chips inside the flyout
+  ok   wheel inside the flyout
+  ok   graph inside the flyout
+  ok   crosshair inside the flyout
+  ok   analog inside the flyout
+  ok   radar inside the flyout
+  ok   image inside the flyout
+  ok   flyout viewer reacts to its variable
+  ok   flyout viewer variable repaints
+  ok   widget knows how to serialise its state
+== 22b. topbar search: filter, sections, tab hop, clear, toggle ==
+  ok   search bar on the topbar
+  ok   search box is a text box
+  ok   placeholder + text metrics
+  ok   query survives the click into the box
+  ok   query starts out empty
+  ok   magnifier is hand drawn (ring + handle)
+  ok   clear button exists, hidden, with a drawn cross
+  ok   caption shortened to clear the search bar
+  ok   caption keeps every glyph
+  ok   rail scrolls when there are many tabs
+  ok   a matching row stays visible
+  ok   rows without a match hide
+  ok   search hops to the tab that holds the hit
+  ok   clear button shows up while filtering
+  ok   hop back to the tab of the new hit
+  ok   a section stays while one of its rows matches
+  ok   its sibling rows hide
+  ok   a query with no hits hides the section
+  ok   ...and every row
+  ok   ...but keeps a page on screen
+  ok   Cyrillic query finds the row
+  ok   Cyrillic match is case insensitive
+  ok   a hit in the middle of the name counts
+  ok   the whole name matches too
+  ok   a tab name keeps every row of that tab
+  ok   ...and moves to that tab
+  ok   clearing restores the rows
+  ok   clearing restores the sections
+  ok   clear button hides again
+  ok   clear button is back while filtering
+  ok   clear button empties the query
+  ok   ...and restores the rows
+  ok   settings panel offers a search toggle
+  ok   switching it off hides the bar
+  ok   ...and empties the query
+  ok   ...and hands the caption its full width back
+  ok   switching it back on shows the bar
+  ok   ...and shortens the caption again
+  ok   the topbar still drags the window
+  ok   a press on the search box does not drag the window
+  ok   slider track sits inside the row
+  ok   slider fill + knob ride on the track
+  ok   the slider knob stays clear of the caption
+  ok   dropdown popup open
+  ok   popup carries a click shield
+  ok   poll Refresh keeps the very same popup open
+  ok   ...with the refreshed options inside
+  ok   selector click closes it
+== 27. right clicking a gear is inert ==
+  ok   the compact settings popup is gone
+  ok   the flyout starts closed
+  ok   right click opens nothing
+  ok   ...and no compact panel appears
+  ok   left click still opens the full flyout
+  ok   right click does not close the open flyout
+  ok   the flyout was widened 25% (210 -> 263)
+  ok   the settings slider is stacked: caption above the track
+  ok   ...the value read-out rides the caption line
+  ok   ...the track spans the row
+  ok   ...and the row is taller than a standard one
+  ok   reopening the flyout leaks no input handler (grew by 0)
+  ok   the topbar panel replaces the gear flyout
+  ok   Window:HideSettings closes it
+== 23. the loading animation cleans itself up ==
+  ok   loading overlay finished and removed
+== 14. visibility, notifications, destroy ==
+  ok   IsVisible defaults to true
+  ok   SetVisibility(false)
+  ok   the interface keybind shows it again
+  ok   Window:SetVisibility delegates
+  ok   notifications still accepted
+  ok   XClient:SaveConfiguration
+  ok   destroy removes the interface
+  ok   window registry emptied
+== 24. example.lua end to end ==
+  ok   example.lua is readable
+  ok   xclient.lua is readable
+  ok   example.lua compiles
+group box preset FOV	90
+sidebar card children	1
+true	true
+  ok   example.lua runs clean (nil)
+  ok   the example built its own library instance
+  ok   the example window exists
+  ok   example flags registered
+  ok   example module settings build on demand
+  ok   example widget flags registered
+  ok   example group box registered its children
+  ok   example group box nested a card
+  ok   example group box accepted Settings
+  ok   example player widget works
+  ok   example window answers the new API
+== 25. loader.lua (disk cache) ==
+  ok   first run returns the library
+  ok   first run wrote the cache file
+  ok   first run remembered the build tag
+  ok   first run downloaded the library
+  ok   first run probed version.txt
+  ok   first run did not need the API
+  ok   second run returns the library
+  ok   second run skipped the download
+  ok   second run did the short version request
+  ok   second run did not need the API
+  ok   loader is exposed in the environment
+  ok   the fixture could be retagged
+[devtest] tags: cached=1.7.9 published=1.7.10 served=1.7.10
+  ok   new tag detected and downloaded (1 download(s), 1 marker request(s))
+  ok   cache refreshed on disk (marker=1.7.10 expected=1.7.10)
+  ok   new version still loads
+  ok   the updated cache is reused (0 download(s))
+[warn]	[XClient loader] the published version could not be read; verifying the cached copy against the repository.
+  ok   offline falls back to the cache
+  ok   GetVersion reads the cached build tag (1.7.10 expected 1.7.10)
+  ok   ClearCache removed the library
+  ok   ClearCache removed the marker
+[warn]	[XClient loader] version.txt says 'sha-aaaa' but the published file declares '1.7.9' - run 'lua _mkversion.lua' and push both.
+  ok   API fallback downloads the library
+  ok   API fallback remembers the commit hash
+  ok   API fallback reuses the cache
+== 26. soak: the gear flyout rebuilt 100 times ==
+  ok   nested flags exist before the first gear press (eager shadows)
+  ok   the nested flags start as configuration shadows
+  ok   the row carrying the gear is registered right away
+  ok   the soak window built its own interface
+  ok   the soak flyout panel exists
